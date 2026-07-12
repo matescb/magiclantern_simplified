@@ -25,8 +25,8 @@ CONFIG_GDBSTUB  = n
 CONFIG_CONSOLE  = y
 CONFIG_DEBUGMSG = 0
 CONFIG_CCACHE   = n
-CONFIG_TCC      = y
-CONFIG_MODULES  = y
+CONFIG_TCC      ?= y
+CONFIG_MODULES  ?= y
 CONFIG_TINYPY   = n
 
 # Work in progress - attempt to emulate both Canon firmware and autoexec.bin

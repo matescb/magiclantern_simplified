@@ -78,3 +78,8 @@ developer_guide/developer_guide.html
 developer_guide/developer_guide.pdf
 
 syntax: regexp
+
+# M50mk2 port: secondary demo build dir + scratch backups (do not commit)
+platform/*/build_m50demo
+*-bak
+src/m50ii_autoexec_demo.c
