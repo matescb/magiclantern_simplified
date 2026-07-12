@@ -42,6 +42,7 @@
 #define SIG_EOSM_202 0x2D7c6dcf // from FF0C0000
 //#define SIG_M50_102  0x3b70901c // from E0040000
 #define SIG_M50_110  0x05EDBC80 // from E0040000
+#define SIG_M50mk2_101 0xD5232B8C // from E0040000 (computed from user's gang100.bin 1.0.1 dump)
 #define SIG_M6II_111 0x3438de7d // from E0040000
 #define SIG_R_180    0x1474d0f5 // from E0040000
 #define SIG_R5_152   0xf10e9902 // from E0100000

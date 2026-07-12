@@ -1360,7 +1360,17 @@ PROP_HANDLER( PROP_MVR_REC_START )
 //confirmed R, RP, M50
 PROP_HANDLER( PROP_LENS_STATIC_DATA )
 {
+#if defined(CONFIG_M50mk2)
+    /* [M50II 2026-07-11] K468's PROP_LENS_STATIC_DATA payload length != our ported struct size (0x138,
+     * copied from K433 M50); the old hard ASSERT(len==sizeof) fired (non-fatally) on every lens event.
+     * Every field read below lies within sizeof(struct), so tolerate the mismatch: proceed when the
+     * payload is at least struct-sized (reads are valid), otherwise bail to avoid reading past buf.
+     * TODO: capture the exact K468 len and resize the struct so lens metadata fully populates. */
+    if (len < (int)sizeof(struct prop_lens_static_data))
+        return;
+#else
     ASSERT(len == sizeof(struct prop_lens_static_data));
+#endif
 
     const struct prop_lens_static_data * _static = (void*) buf;
     strncpy( lens_info.name, _static->lens_name, sizeof(lens_info.name) );

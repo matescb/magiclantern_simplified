@@ -199,14 +199,30 @@ static void startup_warning(char* msg)
 {
     /* note: this function is called before load_fonts, so in order to print something, we need to load them */
     _load_fonts();
-    
+
+    /* On early boot (M50 II, my_big_init_task) FIO/card may not be ready yet, so
+     * _load_fonts() can't read any font and there is no usable text backend.
+     * Drawing here would dereference a NULL font (the historical big.2 abort at
+     * rbf_draw_string). Fall back to UART/debug logging and bail out rather than
+     * crash or block the GUI-request path before the GUI is even up. */
+    extern uint32_t dyn_fonts;
+    extern void m50ii_uart_str(const char *);
+    if (dyn_fonts == 0)
+    {
+        m50ii_uart_str("[ML] startup_warning (fonts not ready, UART only): ");
+        m50ii_uart_str(msg);
+        m50ii_uart_str("\n");
+        DryosDebugMsg(0, 15, "startup_warning: %s", msg);
+        return;
+    }
+
     if (!DISPLAY_IS_ON)
     {
         /* force playback mode if we start with display off */
         SetGUIRequestMode(1);
         msleep(1000);
     }
-    
+
     bmp_printf(FONT_LARGE, 0, 0, msg);
     redraw_after(5000);
 }
@@ -242,6 +258,12 @@ void _find_ml_card()
     }
     else
     {
+        /* No ML dir seen on either slot. is_dir() can transiently fail if FIO/
+         * storage isn't ready this early (M50 II, my_big_init_task). ML_CARD
+         * already defaults to the SD slot on single-slot bodies, so we keep that
+         * default; startup_warning() is now safe when fonts aren't loaded. */
+        extern void m50ii_uart_str(const char *);
+        m50ii_uart_str("[ML] _find_ml_card: no ML dir seen (FIO not ready?), using default card\n");
         startup_warning("Could not find ML files.");
     }
 }

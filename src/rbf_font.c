@@ -54,6 +54,20 @@ static font *new_font() {
 
 uint32_t font_by_name(char *file, uint32_t fg_color, uint32_t bg_color)
 {
+#if defined(CONFIG_M50mk2)
+    /* [M50II 2026-07-11] The bmp_printf(FONT_CANON,...) error paths below draw via Canon's
+     * BFNT backend, which calls GraphicsConvertPosType with a pos_type M50 II can't map (0xD)
+     * -> the converter returns 0x8000000D and the caller branches to pc=0x2 -> abort. That's
+     * the big.5 crash: on HW a font can fail FIO_GetFileSize (card not ready as early as it is
+     * instant in QEMU), taking the draw path. Route the diagnostics to UART instead of drawing,
+     * and log which font is being loaded so the boot log pins any straggler. */
+    extern void m50ii_uart_str(const char *);
+    #define FONT_LOAD_ERR(msg, f) do { m50ii_uart_str("[ML] font_by_name ERR "); \
+        m50ii_uart_str(msg); m50ii_uart_str(": "); m50ii_uart_str(f); m50ii_uart_str("\n"); } while (0)
+#else
+    #define FONT_LOAD_ERR(msg, f) bmp_printf(FONT_CANON, 0, 0, "%s: %s", msg, f)
+#endif
+
     /* check if this font was already loaded */
     for(int pos = 0; pos < (int)dyn_fonts; pos++)
     {
@@ -68,7 +82,7 @@ uint32_t font_by_name(char *file, uint32_t fg_color, uint32_t bg_color)
     if(dyn_fonts >= MAX_DYN_FONTS)
     {
         beep();
-        bmp_printf(FONT_CANON, 0, 0, "Too many fonts");
+        FONT_LOAD_ERR("too many fonts", file);
         return FONT_CANON;
     }
     
@@ -77,23 +91,25 @@ uint32_t font_by_name(char *file, uint32_t fg_color, uint32_t bg_color)
     snprintf(filename, sizeof(filename), "ML/FONTS/%s.RBF", file);
     
     uint32_t size;
-    if((FIO_GetFileSize( filename, &size ) != 0) || (size == 0))
+    int fio_ret = FIO_GetFileSize( filename, &size );
+    if((fio_ret != 0) || (size == 0))
     {
         /* failed to load, return default font */
         beep();
-        bmp_printf(FONT_CANON, 0, 0, "%s not found", file);
+        FONT_LOAD_ERR("not found", file);
         return FONT_CANON;
     }
-    
+
     void *font = new_font();
-    
+
     /* load the font here */
     if(!rbf_font_load(filename, font, 0))
     {
-        bmp_printf(FONT_CANON, 0, 0, "%s not loaded", file);
+        FONT_LOAD_ERR("not loaded", file);
         free(font);
         return FONT_CANON;
     }
+#undef FONT_LOAD_ERR
 
     /* now updated cached font name (not filename) */
     dyn_font_name[dyn_fonts] = malloc(strlen(filename) + 1);
@@ -160,7 +176,6 @@ static int font_read(FILE* fd, unsigned char *dest, int len)
     int bytes_read = 0;
 
     unsigned char *ubuffer = fio_malloc(len);
-    
     if (ubuffer)
     {
         // Read block and copy to dest
@@ -189,7 +204,7 @@ static int rbf_font_load(char *file, font* f, int maxchar)
     {
         return 0;
     }
-    
+
     // read header
     i = font_read(fd, (unsigned char*)&(f->hdr), sizeof(font_hdr));
 
@@ -225,10 +240,12 @@ static int rbf_font_load(char *file, font* f, int maxchar)
 
 //-------------------------------------------------------------------
 static inline int rbf_font_height(font *rbf_font) {
+    if (!rbf_font) return 0;   /* [M50II] bring-up: draw before fonts loaded (FIO not ready) */
     return rbf_font->hdr.height;
 }
 //-------------------------------------------------------------------
 static inline int rbf_char_width(font *rbf_font, int ch) {
+    if (!rbf_font) return 0;   /* [M50II] guards rbf_str_width/clipped_width/strlen_clipped */
     return rbf_font->wTable[ch];
 }
 
@@ -352,6 +369,11 @@ static void FAST font_draw_char_shadow(font *rbf_font, int x, int y, char *cdata
 
 //-------------------------------------------------------------------
 static int FAST rbf_draw_char(font *rbf_font, int x, int y, int ch, int fontspec) {
+    /* [M50II 2026-07-11] Defensive NULL-font guard: during early bring-up a draw can be requested
+     * before fonts are loaded (e.g. startup_warning -> _load_fonts fails because FIO/card isn't
+     * mounted yet), leaving rbf_font NULL -> deref of rbf_font->cTable (+0x58) hard-aborts. A NULL
+     * font is always an error state; skip drawing instead of crashing. */
+    if (!rbf_font) return 0;
     // Get char data pointer
     char* cdata = rbf_font_char(rbf_font, ch);
     
@@ -377,6 +399,7 @@ static int FAST rbf_draw_char(font *rbf_font, int x, int y, int ch, int fontspec
 //-------------------------------------------------------------------
 // Draw a string colored 'c1' with the character at string-position 'c' colored 'c2'.
 static int rbf_draw_string_c(font *rbf_font, int x, int y, const char *str, int fontspec1, int c, int fontspec2) {
+     if (!rbf_font) return 0;   /* early boot: drawn before fonts loaded (FIO not ready) */
      int l=0, i=0;
 
      while (*str) {
@@ -402,6 +425,7 @@ static int rbf_draw_string_simple(font *rbf_font, int x, int y, const char *str,
 //-------------------------------------------------------------------
 static int rbf_draw_clipped_string(font *rbf_font, int x, int y, const char *str, int fontspec, int maxlen)
 {
+    if (!rbf_font) return 0;   /* early boot: drawn before fonts loaded (FIO not ready) */
     int i = 0;
     int l = 0;
     
@@ -491,7 +515,8 @@ static int rbf_draw_clipped_string(font *rbf_font, int x, int y, const char *str
 
 //-------------------------------------------------------------------
 static int rbf_draw_string_single_line(font *rbf_font, int x, int y, const char *str, int fontspec, int maxlen) {
-    
+    if (!rbf_font) return 0;   /* early boot: drawn before fonts loaded (FIO not ready) */
+
     /* how much space do we have to draw the string? */
     int len = maxlen;
     
@@ -542,6 +567,7 @@ static int rbf_draw_string_single_line(font *rbf_font, int x, int y, const char 
 }
 
 int rbf_draw_string(font *rbf_font, int x, int y, const char *str, int fontspec) {
+    if (!rbf_font) return 0;   /* early boot: drawn before fonts loaded (FIO not ready) */
 
     /* how much space do we have to draw the string? */
     int len = FONT_GET_TEXT_WIDTH(fontspec);
@@ -636,11 +662,30 @@ static int bfnt_load_from_card()
 /* must be called before menu_init, otherwise it can't measure strings */
 void _load_fonts()
 {
-    /* tolerate multiple calls, but only run the first */
+    /* Tolerate multiple calls, but only latch as done once fonts ACTUALLY load.
+     * A premature call (e.g. startup_warning -> _load_fonts before FIO/card is
+     * ready on M50 II) used to set fonts_loaded=1 up front, poisoning the real
+     * later call at my_big_init_task so it silently no-op'd and ML ran fontless.
+     * We now latch at the end, only on success, so a failed early call retries. */
     static int fonts_loaded = 0;
     if (fonts_loaded)
         return;
-    fonts_loaded = 1;
+
+    /* [M50II 2026-07-11] Direct-UART bisect of the big.5 abort (pos_type=0xD -> converter
+     * returns 0x8000000D -> caller branches to pc=0x2). DryosDebugMsg (the [FDG] markers) is
+     * async and won't flush before the fault, so use synchronous m50ii_uart_str. The LAST
+     * big.5.N printed before [ABORT] pins the crashing segment. Also a hard skip lever:
+     * flip M50II_SKIP_LOAD_FONTS to 1 to bypass _load_fonts entirely (ML runs fontless) and
+     * confirm whether reaching big.8 is blocked here or by an async CBR elsewhere. */
+    extern void m50ii_uart_str(const char *);
+    m50ii_uart_str("[ML] big.5.0: _load_fonts ENTER\n");
+#ifndef M50II_SKIP_LOAD_FONTS
+#define M50II_SKIP_LOAD_FONTS 0
+#endif
+#if M50II_SKIP_LOAD_FONTS
+    m50ii_uart_str("[ML] big.5.SKIP: _load_fonts bypassed (M50II_SKIP_LOAD_FONTS)\n");
+    return;
+#endif
 
     int bfnt_status = -1;
 
@@ -667,13 +712,23 @@ void _load_fonts()
         bfnt_status = 0;
     #endif
 
+    m50ii_uart_str("[ML] big.5.1: bfnt block done, building canon fake-font\n");
+
     /* fake font for Canon BFNT font backend, with the same metrics */
     font *canon_font = new_font();
     canon_font->hdr.height = 40;
     for (int i = 0; i < 256; i++)
         canon_font->wTable[i] = bfnt_char_get_width(i);
+    m50ii_uart_str("[ML] big.5.2: canon fake-font wTable built (bfnt_char_get_width x256)\n");
+
+    /* [M50II FDG 2026-07-10] bisect the Graphics::GraphicsConvertPosType.c:9 assert that fires in
+     * _load_fonts once the display is live (post-CamIF-fix). Markers B/C/E split the function so the
+     * next HW boot shows which segment stalls (or, if all print + big.5 prints, the assert is an
+     * async Canon GUI task, not this ML path). Remove once localized. */
+    DryosDebugMsg(0, 15, "[FDG] B: canon-bfnt fake-font built (bfnt_status=%d)", bfnt_status);
 
     /* Try to load some RBF fonts */
+    m50ii_uart_str("[ML] big.5.3: loading RBF fonts (font_by_name block)\n");
     font_by_name("term12", COLOR_BLACK, COLOR_WHITE);
     font_by_name("term20", COLOR_BLACK, COLOR_WHITE);
     #ifdef CONFIG_LOW_RESOLUTION_DISPLAY
@@ -683,6 +738,9 @@ void _load_fonts()
     #endif
     font_by_name("argnor28", COLOR_BLACK, COLOR_WHITE);
     font_by_name("argnor32", COLOR_BLACK, COLOR_WHITE);
+
+    m50ii_uart_str("[ML] big.5.4: RBF font_by_name block done, entering fallback setup\n");
+    DryosDebugMsg(0, 15, "[FDG] C: RBF font_by_name block done (dyn_fonts=%d)", dyn_fonts);
 
     if (bfnt_status == 0) {
         /* use BFNT font as fallback */
@@ -712,4 +770,12 @@ void _load_fonts()
     font_med = *fontspec_font(FONT_MED);
     font_med_large = *fontspec_font(FONT_MED_LARGE);
     font_large = *fontspec_font(FONT_LARGE);
+
+    DryosDebugMsg(0, 15, "[FDG] E: fontspec block done, _load_fonts about to return");
+
+    /* Only latch as loaded if at least one usable font really came up (a BFNT
+     * backend or any dynamic RBF font). If FIO/card wasn't ready yet, leave
+     * fonts_loaded=0 so a later call can retry rather than run fontless. */
+    if (bfnt_status == 0 || dyn_fonts > 0)
+        fonts_loaded = 1;
 }

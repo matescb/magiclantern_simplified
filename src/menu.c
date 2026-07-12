@@ -5621,6 +5621,14 @@ static void start_redraw_flood()
 
 static void piggyback_canon_menu()
 {
+#if defined(CONFIG_M50mk2)
+    /* [2026-07-12] Do NOT switch Canon into GUIMODE_MENU on M50 II. SetGUIRequestMode(GUIMODE_MENU)
+     * blows up the EVF/LiveView state on this body (LiveViewDrive::EvfDevState.c nullptr assert flood
+     * the instant FN opens the menu) and drops the display -- same class as the old Edet cascade:
+     * don't make Canon change display state. The ML menu draws as a pure OVERLAY on our own OSD layer
+     * (iter4), so we leave Canon's display/GUI mode untouched. No piggyback needed. */
+    return;
+#endif
 #ifdef GUIMODE_ML_MENU
     int new_gui_mode = GUIMODE_ML_MENU;
     if (!new_gui_mode) return;
@@ -5639,6 +5647,9 @@ static void piggyback_canon_menu()
 
 static void close_canon_menu()
 {
+#if defined(CONFIG_M50mk2)
+    return;   /* [2026-07-12] no piggyback on M50 II -> no Canon GUI mode to restore (see piggyback_canon_menu) */
+#endif
 #ifdef GUIMODE_ML_MENU
     if (CURRENT_GUI_MODE == 0) return;
     if (sensor_cleaning) return;
@@ -5819,10 +5830,35 @@ menu_task( void* unused )
             if (menu_shown)
             {
                 /* should we still display the menu? */
-                if (sensor_cleaning ||
+                int menu_want_close = sensor_cleaning ||
                     initial_mode != shooting_mode ||
                     gui_state == GUISTATE_MENUDISP ||
-                    (!DISPLAY_IS_ON && CURRENT_GUI_MODE != GUIMODE_PLAY))
+                    (!DISPLAY_IS_ON && CURRENT_GUI_MODE != GUIMODE_PLAY);
+#if defined(CONFIG_M50mk2)
+                /* [2026-07-12 bring-up] On M50 II the ML menu opened+drew via FN but auto-closed in
+                 * ~1s: one of these conditions trips falsely (likely gui_state==MENUDISP, which ML's
+                 * own SetGUIRequestMode(GUIMODE_MENU) piggyback sets, or a garbage shooting_mode).
+                 * SUPPRESS the auto-close and log WHICH condition tripped, so the menu stays open for
+                 * input testing and we learn the real reason in one boot. Replace with a targeted
+                 * guard once known. */
+                if (menu_want_close)
+                {
+                    extern void m50ii_uart_str(const char *);
+                    static int menu_close_logged = 0;
+                    if (!menu_close_logged)
+                    {
+                        menu_close_logged = 1;
+                        m50ii_uart_str("[ML] menu: auto-close SUPPRESSED (M50mk2); reason(s):");
+                        if (sensor_cleaning)                    m50ii_uart_str(" sensor_cleaning");
+                        if (initial_mode != shooting_mode)      m50ii_uart_str(" mode-changed");
+                        if (gui_state == GUISTATE_MENUDISP)     m50ii_uart_str(" gui_state=MENUDISP");
+                        if (!DISPLAY_IS_ON && CURRENT_GUI_MODE != GUIMODE_PLAY) m50ii_uart_str(" display-off");
+                        m50ii_uart_str("\n");
+                    }
+                    menu_want_close = 0;
+                }
+#endif
+                if (menu_want_close)
                 {
                     /* close ML menu */
                     gui_stop_menu();

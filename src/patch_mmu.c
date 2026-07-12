@@ -27,20 +27,102 @@
 #if !defined(PTR_ALLOC_MEM_START)
 // If AllocMem start is defined, we assume MMU tables should be located there.
 // Otherwise we reserve space in magiclantern.bin:
-// 0x10000 for 1 remapped page, (0x10000 aligned)
+// 0x10000 per remapped page, (0x10000 aligned)
 //  0x4900 for the L1 table, (0x4000 aligned)
 //   0x300 padding
 //   0x400 per L2 table (0x400 aligned) // need one per 1MB region containing remaps
-// sizeof(struct mmu_L2_page_info)
-static uint8_t generic_mmu_space[MMU_PAGE_SIZE + MMU_L1_TABLE_SIZE
-                                 + 0x300 + MMU_L2_TABLE_SIZE
-                                 + sizeof(struct mmu_L2_page_info)]
+// sizeof(struct mmu_L2_page_info) per L2 table
+//
+// [M50II Phase-1 2026-07-11] The pool must hold enough *concurrent* 64K remap pages
+// for every distinct ROM page we patch. With the 0xF0 mirror gated OFF, the active
+// config needs exactly TWO:
+//   1) INIT1_HIJACK    -> PTR_INIT1_TASK page 0xe0040000 (region 0xe0000000)
+//   2) GraphicsConvertPosType converter -> 0xe01b0000     (region 0xe0100000)
+// The stock single-page buffer let INIT1_HIJACK consume the only page, so the GCPT
+// apply_data_patch() found no free L2/page (find_L2_for_patch -> NULL) and SILENTLY
+// failed -> the assert survived on real hardware even though QEMU (which never calls
+// the converter with pos_type=11) reached big.8.
+//
+// *** MEMORY BUDGET IS THE CEILING, NOT a "runtime bounds check". *** This buffer lives
+// in ML's BSS, and boot-d678.c:1116 reserves ml_reserved_mem = _bss_end - user_mem_start
+// and SHRINKS Canon's user_mem_len by exactly that. Each extra page is ~64KB stolen from
+// Canon's DryOS pool. HW-CONFIRMED 2026-07-11: MMU_MAX_REMAP_PAGES=4 grew _bss_end to
+// 0x180700, stole 757KB, left Canon only ~368KB -> Canon's DryOS init panicked BEFORE
+// ML's boot_pre_init_task (no `pre.0`, LED panic). The known-good build (1 page) left
+// Canon ~568KB. Keep this at the minimum: 2 pages -> _bss_end ~0x1603f4, ~500KB left for
+// Canon. DO NOT raise without re-checking the user_mem headroom; enabling the 0xF0 mirror
+// (a 3rd page) needs that headroom re-verified on HW first.
+// *** 2 PAGES, PAID FOR BY RECLAIM 2026-07-11. *** Growing the pool alone starves Canon
+// (HW: 2 pages @ _bss_end 0x15fe00 left Canon ~490KB -> DryOS pool panic before pre.0).
+// The fix is NOT to shrink the pool but to RECLAIM the 64K elsewhere: M50mk2's Makefile
+// disables CONFIG_TCC + CONFIG_MODULES (~94KB text+bss), which drops _bss_end BELOW the
+// known-good 0x14fa00 even WITH this 2nd page. That lets the GraphicsConvertPosType:9 NOP
+// actually allocate its remap page (INIT1_HIJACK holds page 1, GCPT gets page 2) and apply
+// CLEANLY (rc=0, readback=NOP 0x8000F3AF) -- the clean NOP avoids the noreturn-assert crash
+// the non-fatal handler hit on HW (handler kept as a general net for other asserts). If you
+// re-enable TCC/modules you MUST drop this back to 1 or find other reclaim, or Canon panics.
+#ifndef MMU_MAX_REMAP_PAGES
+#define MMU_MAX_REMAP_PAGES 2
+#endif
+static uint8_t generic_mmu_space[MMU_MAX_REMAP_PAGES * MMU_PAGE_SIZE + MMU_L1_TABLE_SIZE
+                                 + 0x300 + MMU_MAX_REMAP_PAGES * MMU_L2_TABLE_SIZE
+                                 + MMU_MAX_REMAP_PAGES * sizeof(struct mmu_L2_page_info)]
                __attribute__((aligned(0x10000)));
 #endif
 
 #include "platform/mmu_patches.h"
 
 extern uint32_t is_cpu1_ready; // set via task_create_ex() on cpu1, cpu1_ready()
+
+/* [M50II HW-TRACE] Direct-UART checkpoints to localize the mmu_init PrefetchAbort.
+ * Canon's qprintf is QEMU-only (no-op on HW), so use the working direct-MMIO
+ * primitives from boot-d678.c. Set M50II_TRACE_MMU to 0 to compile these out. */
+#define M50II_TRACE_MMU 0   /* [2026-07-12] CPU1 bring-up SOLVED (reboot.c single-pointer mailbox fix; cpu1.0-1.3 wrapper fired, cpu1 adopts ML tables). Trace off for keeper build; flip to 1 to re-instrument the mmu.a-h + i2/h2 + cpu1.x hijack chain. */
+#if M50II_TRACE_MMU
+extern void m50ii_uart_str(const char *);
+/* Hex printer kept LOCAL to patch_mmu.o so boot-d678.o stays byte-identical to the
+ * known-good HW build (its function addresses must not shift). Uses the global
+ * m50ii_uart_str() that already exists in boot-d678.c. */
+static void m50ii_mmu_hex(const char *label, uint32_t val)
+{
+    static const char hx[] = "0123456789ABCDEF";
+    char buf[11];
+    buf[0] = '0'; buf[1] = 'x';
+    for (int i = 0; i < 8; i++) buf[2 + i] = hx[(val >> (28 - i * 4)) & 0xF];
+    buf[10] = 0;
+    m50ii_uart_str(label);
+    m50ii_uart_str(" = ");
+    m50ii_uart_str(buf);
+    m50ii_uart_str("\n");
+}
+#define MMU_TRACE(s)       m50ii_uart_str(s)
+#define MMU_TRACE_HEX(l, v) m50ii_mmu_hex((l), (uint32_t)(v))
+#else
+#define MMU_TRACE(s)       do {} while (0)
+#define MMU_TRACE_HEX(l, v) do {} while (0)
+#endif
+
+#if defined(CONFIG_M50mk2)
+/* [M50II Phase-1] Unconditional UART logger for the GraphicsConvertPosType patch-
+ * persistence probe. Unlike MMU_TRACE_HEX (gated on M50II_TRACE_MMU), this always
+ * compiles in so the boot log on real hardware shows (a) the apply_data_patch return
+ * codes for the 0xE0 page and its 0xF0 alias, and (b) the post-remap read-back of
+ * both aliases (NOP.w == 0x8000F3AF means the patch is live on that alias). Kept
+ * local to patch_mmu.o; uses the global m50ii_uart_str() from boot-d678.c. */
+extern void m50ii_uart_str(const char *);
+static void gcpt_log_hex(const char *label, uint32_t val)
+{
+    static const char hx[] = "0123456789ABCDEF";
+    char buf[11];
+    buf[0] = '0'; buf[1] = 'x';
+    for (int i = 0; i < 8; i++) buf[2 + i] = hx[(val >> (28 - i * 4)) & 0xF];
+    buf[10] = 0;
+    m50ii_uart_str(label);
+    m50ii_uart_str(" = ");
+    m50ii_uart_str(buf);
+    m50ii_uart_str("\n");
+}
+#endif
 
 // This function expects a bitfield of cpu_ids. Bit 0 is cpu0, bit 1 cpu1, etc.
 extern int send_software_interrupt(uint32_t interrupt, uint32_t shifted_cpu_id);
@@ -464,11 +546,28 @@ void change_mmu_tables_wrapper(void)
     uint32_t cpu_id = get_cpu_id();
     uint32_t cpu_mmu_offset = MMU_L1_TABLE_SIZE - 0x100 + cpu_id * 0x80;
     uint32_t old_int = cli();
+    MMU_TRACE_HEX("[ML] cmt.0 pre change_mmu_tables TTBR0", (uint32_t)global_mmu_conf.L1_table + cpu_mmu_offset);
+    MMU_TRACE_HEX("[ML] cmt.0 pre change_mmu_tables TTBR1", (uint32_t)global_mmu_conf.L1_table);
     change_mmu_tables(global_mmu_conf.L1_table + cpu_mmu_offset,
                       global_mmu_conf.L1_table,
                       cpu_id);
+    MMU_TRACE("[ML] cmt.1 post change_mmu_tables SURVIVED\n");
     sei(old_int);
+    MMU_TRACE("[ML] cmt.2 post sei; _sync_caches ...\n");
     _sync_caches();
+    MMU_TRACE("[ML] cmt.3 _sync_caches OK; wrapper done\n");
+#ifndef M50II_CPU1_ABORT_HANDLER
+#define M50II_CPU1_ABORT_HANDLER 1
+#endif
+#if defined(CONFIG_M50mk2) && M50II_CPU1_ABORT_HANDLER
+    /* [iter14] Install an ML abort handler on CPU1 (VBAR is banked per-core) so a silent CPU1 fault --
+     * e.g. a migrated GuiMainTask running ml_gui_main_task on CPU1 -- prints its PC instead of vanishing. */
+    if (cpu_id != 0)
+    {
+        extern void m50ii_install_abort_handler_cpu1(void);
+        m50ii_install_abort_handler_cpu1();
+    }
+#endif
 }
 
 static uint32_t mmu_globals_initialised = 0;
@@ -664,8 +763,15 @@ int apply_normal_patches(void)
 #ifdef CONFIG_INIT1_HIJACK
 static void init1_task_wrapper(void)
 {
+    // [CPU1 DIAG] link #3: this only prints if Canon actually created our wrapper
+    // on cpu1 (i.e. read the patched PTR_INIT1_TASK). Runs on cpu1, still on
+    // Canon's original MMU tables (UART is device MMIO, mapped in both table sets).
+    MMU_TRACE("[ML] cpu1.0 init1_task_wrapper ENTERED\n");
     // get orig value of init1_task()
     void (*init1_task)(void) = *(void(*)(void))(*(uint32_t *)PTR_INIT1_TASK);
+    // [CPU1 DIAG] read through cpu1's still-Canon tables => expect the ORIGINAL
+    // init1_task addr (not our wrapper). Wrapper|1 here would mean recursion risk.
+    MMU_TRACE_HEX("[ML] cpu1.1 orig init1_task (via Canon tables)", (uint32_t)init1_task);
     // possibly not needed, but we are about to change the content
     // read through PTR_INIT1_TASK so let's ensure we get orig value
     asm(
@@ -673,7 +779,10 @@ static void init1_task_wrapper(void)
     );
 
     // update TTBRs, handover to the real init1_task
+    MMU_TRACE("[ML] cpu1.2 PRE change_mmu_tables_wrapper\n");
     change_mmu_tables_wrapper();
+    // [CPU1 DIAG] link #4: cpu1 survived adopting ML's remapped tables
+    MMU_TRACE("[ML] cpu1.3 POST change_mmu_tables, calling real init1_task\n");
     init1_task();
 }
 #endif // CONFIG_INIT1_HIJACK
@@ -692,7 +801,10 @@ static int init_remap_mmu(void)
         // Don't call it twice from the same CPU, in simultaneously scheduled tasks.
         if (mmu_remap_cpu0_init == 0)
         {
+            MMU_TRACE("[ML] mmu.a init_mmu_globals ...\n");
             init_mmu_globals();
+            MMU_TRACE_HEX("[ML] mmu.b globals_initialised", mmu_globals_initialised);
+            MMU_TRACE_HEX("[ML] mmu.b L1_table", (uint32_t)global_mmu_conf.L1_table);
 
             if (!mmu_globals_initialised)
                 return -1;
@@ -700,7 +812,10 @@ static int init_remap_mmu(void)
             // Later on we use SGI to get cpu1 to take MMU table changes.
             // This early on we don't, problems with DryOS not being fully init'd,
             // but we can init the required ML parts here.
+            MMU_TRACE_HEX("[ML] mmu.c sgi_handlers_ptr(*DRYOS_SGI_HANDLERS_PTR)", *(volatile uint32_t *)DRYOS_SGI_HANDLERS_PTR);
+            MMU_TRACE("[ML] mmu.d register_wake_handler ...\n");
             register_wake_handler();
+            MMU_TRACE_HEX("[ML] mmu.e sgi_wake_handler_index", (uint32_t)sgi_wake_handler_index);
             if (sgi_wake_handler_index == 0)
                 return -3;
             qprintf("Registered cpu1 wake handler\n");
@@ -735,11 +850,85 @@ static int init_remap_mmu(void)
                                     .new_value = init1_task_wrapper_addr,
                                     .size = 4,
                                     .description = NULL };
+            // [CPU1 DIAG, gated on M50II_TRACE_MMU] the PTR_INIT1_TASK->wrapper patch.
+            // The meaningful readback (link #2) is AFTER cpu0 adopts ML tables, at mmu.h2
+            // below (before adoption cpu0 is still on Canon tables => would show OLD value).
+            MMU_TRACE_HEX("[ML] mmu.i2 old *PTR_INIT1_TASK (orig init1)", patch2.old_value);
+            MMU_TRACE_HEX("[ML] mmu.i2 new value (wrapper|1)", init1_task_wrapper_addr);
             apply_data_patch(&global_mmu_conf, &patch2);
             #endif // CONFIG_INIT1_HIJACK
 
+            /* [M50II Phase-1 2026-07-10] Neutralize the Graphics::GraphicsConvertPosType.c:9 assert.
+             * Once the CamIF fix brought the display alive, Canon's GUI feeds the position-type
+             * converter FUN_e01b8c8c a pos_type=11 (0xb): the caller guards pos_type<13 but the
+             * converter maps only {0-10,12}, so 11 falls to `default: Assert(...,9)` and STALLS both
+             * Canon's Startup GUI bring-up and ml_init (never reaches big.5/big.8). NOP the assert
+             * `bl 0xE0674574` at 0xE01B8CAC so the default case simply returns r4=0 (a valid position
+             * code) instead of asserting. Patched in ML's remapped tables (cpu0 runs Canon GUI there).
+             * Tests whether Canon GUI + ml_init then proceed to big.8 / LiveView / READY. Toggle 0 to
+             * revert. */
+            #define M50II_NEUTRALIZE_GCPT_ASSERT 1
+            /* [M50II Phase-1 2026-07-11] Patch the 0xF0000000 ROM alias too. The M50-family
+             * ROM is aliased at BOTH 0xE0000000 and 0xF0000000; if a converter call reaches
+             * 0xF01B8CAC via the mirror it runs PRISTINE ROM and the assert recurs. Gated OFF
+             * by default: (1) the primary root cause turned out to be pool exhaustion (the
+             * 0xE0 patch silently failed to allocate before MMU_MAX_REMAP_PAGES was raised),
+             * so fixing that alone may suffice; (2) apply_data_patch copies the backing page
+             * FROM 0xF01B0000 (assign_64k_to_L2_table), which data-aborts if Canon's early
+             * tables don't map the 0xF0 alias. The post-remap read-back below tells us whether
+             * the 0xF0 mirror is actually the execution path before we take that risk -- flip
+             * this to 1 only if *0xE01B8CAC reads NOP yet the line-9 assert still fires. */
+            #define M50II_PATCH_GCPT_MIRROR 0
+            #if defined(CONFIG_M50mk2) && M50II_NEUTRALIZE_GCPT_ASSERT
+            {
+                /* All 7 `bl 0xE0674574` assert sites in the GraphicsConvertPosType.c converter
+                 * cluster (lines 9/30/41/53/66/84/129), ALL inside the SAME 64KB ROM page.
+                 * apply_data_patch re-copies the pristine ROM page each call, so 7 separate calls
+                 * would leave only the LAST NOP -- apply ONE region patch (0xE01B8CAC..+0x228)
+                 * with all 7 bl sites pre-NOP'd in the buffer so the default case returns its r4
+                 * position code instead of asserting. */
+                static const uint32_t noff[] = { 0x00, 0x44, 0x64, 0x8c, 0xbc, 0x11a, 0x224 };
+                static uint8_t gcpt_buf[0x228];
+                memcpy_dryos(gcpt_buf, (void *)0xE01B8CAC, sizeof(gcpt_buf));
+                int gcpt_done = 0;
+                for (unsigned k = 0; k < COUNT(noff); k++)
+                {
+                    uint8_t *p = &gcpt_buf[noff[k]];
+                    /* fail-safe: only NOP if the original is really a thumb-2 BL (LE) */
+                    if ((p[1] & 0xf8) == 0xf0 && (p[3] & 0xd0) == 0xd0)
+                    {
+                        p[0] = 0xAF; p[1] = 0xF3; p[2] = 0x00; p[3] = 0x80;   /* NOP.w (thumb-2), LE */
+                        gcpt_done++;
+                    }
+                }
+                struct patch gp = { .addr = (uint8_t *)0xE01B8CAC,
+                                    .old_value = *(uint32_t *)0xE01B8CAC,
+                                    .new_values = gcpt_buf,
+                                    .size = sizeof(gcpt_buf),
+                                    .description = NULL };
+                int rc_e0 = apply_data_patch(&global_mmu_conf, &gp);
+                /* rc == 0 => the ROM page was actually remapped to a RAM shadow and the NOPs
+                 * were written. A negative value (e.g. E_PATCH_BAD_MMU_PAGE) means the pool had
+                 * no free page -- the historical silent failure that let the assert survive. */
+                gcpt_log_hex("[ML] mmu.gcpt: sites NOP'd", (uint32_t)gcpt_done);
+                gcpt_log_hex("[ML] mmu.gcpt: apply @0xE0 rc", (uint32_t)rc_e0);
+
+            #if M50II_PATCH_GCPT_MIRROR
+                struct patch gp_mirror = { .addr = (uint8_t *)0xF01B8CAC,
+                                           .old_value = *(uint32_t *)0xF01B8CAC,
+                                           .new_values = gcpt_buf,
+                                           .size = sizeof(gcpt_buf),
+                                           .description = NULL };
+                int rc_f0 = apply_data_patch(&global_mmu_conf, &gp_mirror);
+                gcpt_log_hex("[ML] mmu.gcpt: apply @0xF0 rc", (uint32_t)rc_f0);
+            #endif
+                m50ii_uart_str("[ML] mmu.gcpt: GraphicsConvertPosType cluster patched (1 region, 7 sites)\n");
+            }
+            #endif // M50II_NEUTRALIZE_GCPT_ASSERT
+
             // Perform early hard-coded patches in include/platform/mmu_patches.h
             int err = apply_early_patches();
+            MMU_TRACE_HEX("[ML] mmu.f apply_early_patches err", (uint32_t)err);
             if (err < 0)
             {
                 qprintf("Error from apply_early_patches: %d\n", err);
@@ -747,7 +936,28 @@ static int init_remap_mmu(void)
             }
 
             // update TTBRs (this DryOS function also triggers TLBIALL)
+            MMU_TRACE("[ML] mmu.g PRE change_mmu_tables_wrapper ...\n");
             change_mmu_tables_wrapper();
+            MMU_TRACE("[ML] mmu.h POST change_mmu_tables_wrapper SURVIVED\n");
+            #ifdef CONFIG_INIT1_HIJACK
+            // [CPU1 DIAG] link #2: now cpu0 is on ML's remapped tables. If the patch
+            // landed, this reads back the wrapper|1 value. If it still shows the orig
+            // init1 addr, the hijack can never fire (cpu0 will hand cpu1 the real init1).
+            MMU_TRACE_HEX("[ML] mmu.h2 readback *PTR_INIT1_TASK (ML tables)", *(volatile uint32_t *)PTR_INIT1_TASK);
+            #endif // CONFIG_INIT1_HIJACK
+
+            #if defined(CONFIG_M50mk2) && M50II_NEUTRALIZE_GCPT_ASSERT
+            /* [M50II Phase-1] Now cpu0 is on ML's remapped tables, so this read-back reflects
+             * the PATCHED view (the earlier in-block reads still saw pristine ROM via Canon's
+             * tables). NOP.w == 0x8000F3AF at 0xE01B8CAC proves the converter assert is neutralized
+             * on the 0xE0 path. If this shows NOP but ml_init still asserts line 9, execution is
+             * reaching the converter via the 0xF0 alias -> enable M50II_PATCH_GCPT_MIRROR. */
+            gcpt_log_hex("[ML] mmu.gcpt: readback *0xE01B8CAC (ML tables)", *(volatile uint32_t *)0xE01B8CAC);
+            #if M50II_PATCH_GCPT_MIRROR
+            gcpt_log_hex("[ML] mmu.gcpt: readback *0xF01B8CAC (ML tables)", *(volatile uint32_t *)0xF01B8CAC);
+            #endif
+            #endif // CONFIG_M50mk2 && M50II_NEUTRALIZE_GCPT_ASSERT
+
             mmu_remap_cpu0_init = 1;
 
             // I wanted to trigger cpu1 remap via request_RPC()

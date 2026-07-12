@@ -259,11 +259,43 @@ static void set_S_TX_DATA(int value)
 }
 #endif
 
+#ifdef M50II_TRACE_LADDER
+static void m50ii_trace_wait(uint32_t n)
+{
+    volatile uint32_t i;
+    while (n--)
+    {
+        for (i = 0; i < 0x02000000; i++)
+        {
+        }
+    }
+}
+
+static void m50ii_trace_stage(uint32_t stage)
+{
+#if defined(CARD_LED_ADDRESS) && defined(LEDON) && defined(LEDOFF)
+    m50ii_trace_wait(2);
+    for (uint32_t i = 0; i < stage; i++)
+    {
+        MEM(CARD_LED_ADDRESS) = LEDON;
+        m50ii_trace_wait(1);
+        MEM(CARD_LED_ADDRESS) = LEDOFF;
+        m50ii_trace_wait(1);
+    }
+    m50ii_trace_wait(3);
+#endif
+}
+#define M50II_STAGE(n) m50ii_trace_stage(n)
+#else
+#define M50II_STAGE(n) do { } while (0)
+#endif
+
 
 void
 __attribute__((noreturn))
 cstart( void )
 {
+    M50II_STAGE(1);
     uint32_t s = compute_signature((void*)SIG_START, SIG_LEN);
     uint32_t expected_signature = CURRENT_CAMERA_SIGNATURE;
     if (s != expected_signature)
@@ -273,6 +305,7 @@ cstart( void )
         qprint("            computed from: "); qprintn(SIG_START); qprint("\n");
         fail();
     }
+    M50II_STAGE(2);
 
     /* turn on the LED as soon as autoexec.bin is loaded (may happen without powering on) */
     #if defined(CONFIG_40D) || defined(CONFIG_5DC)
@@ -281,14 +314,17 @@ cstart( void )
     #elif defined(CARD_LED_ADDRESS) && defined(LEDON) // A more portable way, hopefully
         MEM(CARD_LED_ADDRESS) = LEDON;
     #endif
+    M50II_STAGE(3);
 
     blob_memcpy(
         (void*) RESTARTSTART,
         &blob_start,
         &blob_end
     );
+    M50II_STAGE(4);
     
     sync_caches();
+    M50II_STAGE(5);
 
     #ifdef CONFIG_MARK_UNUSED_MEMORY_AT_STARTUP
       #if defined(CONFIG_DIGIC_8X)
@@ -304,6 +340,34 @@ cstart( void )
         memset32((uint32_t *) 0x00D00000, 0x124B1DE0 /* RA(W)VIDEO*/, 0x40000000 - 0x00D00000);
       #endif
     #endif
+
+#if defined(CONFIG_M50mk2)
+    /* [M50II 2026-07-10] RE-INIT THE CamIF XTENSA COPROCESSOR ("Shirahama") MEMORY.
+     * ROOT CAUSE (HW-observed + Discord-proven on R5/R/M50 siblings): the DIGIC-8 "new-style"
+     * 1st-stage bootloader (850D/M50 II family) ERASES the whole AUTOEXEC buffer, which OVERLAPS
+     * the CamIF coprocessor RAM the loader had populated. Under ML nothing re-inits it, so the
+     * Shirahama coprocessor (hosts Camif/EFSub/Print + IS) DIES ~1s into Canon boot -> Canon
+     * cascade: `[MECHA] SHIRAHAMA DIED`, `Mecha::MechaControl.c:264` assert, `[FIO] Not mounted`
+     * (SD never mounts), `[PRP] NotFoundID` (ICU properties undelivered), and RENDERER never
+     * inits (blank LCD, rgb/bmp vram NULL). One cascade behind ALL Tier-1 symptoms.
+     * FIX (proven on EOS R5 = "first time minimal ML booted without crash"): re-run Canon's
+     * CamIF_initialize / reinit_autoexec_memory stub after relocation. M50 II 1.0.1 stub =
+     * FUN_e000690c @ 0xE000690C (thumb 0xE000690D): rebuilds the 6-entry {addr,base,size}
+     * descriptor table from the CamIF ROM blob (0xE1F50000), rebases bf..->d9.. (+0x19800000
+     * ICU-visible shared window) and hands off to the coprocessor loader. MMU is still identity
+     * here, so its physical RAM writes land correctly. Sibling stubs: R=0xE0005B18, R5=0xE0005B79.
+     * CAVEAT: on ORIGINAL EOS R (early-D8, does NOT erase the buffer) calling this HARD-LOCKS;
+     * M50 II is 850D-family (DOES erase) so it should NEED the call. Toggle to 0 to revert to the
+     * keeper behaviour (LED stage 5 reached but not 6 => this call hard-locked). */
+    #define M50II_CAMIF_REINIT 1
+    #if M50II_CAMIF_REINIT
+    {
+        void (*camif_reinit)(void) = (void (*)(void)) 0xE000690D;   /* CamIF_initialize, thumb */
+        camif_reinit();
+        sync_caches();
+    }
+    #endif
+#endif
 
     /* Model-specific MMIO pokes required to start Canon firmware */
     #ifdef CONFIG_DUAL_DIGIC
@@ -326,10 +390,16 @@ cstart( void )
         MEM(0xD20C0084) = 0;
       #endif
     #endif
-    #ifdef CONFIG_850D
+    #if defined(CONFIG_850D) || defined(CONFIG_M50mk2)
         // Digic 8 "new style" first stage loader uses just a single pointer for startup.
         // The difference is that it has to have thumb bit set.
         // So far only 850D is known to use it on Digic 8
+        // [M50II 2026-07-12] M50 Mark II (K468, 1.0.1) is ALSO new-style, NOT older-style
+        // like the original M50: its 1st-stage cpu1 trampoline (reset vector 0xE0019160 ->
+        // 0xe0004900) does `ldr r0,[0xBFE01FC4]; ldr r0,[r0]; bx r0` i.e. reads 0xBFE01FC4
+        // as the cpu1 ENTRY pointer (0xBFE01FC8 is UNUSED in ROM). The older-style write
+        // (0xBFE01FC4=0x10) therefore made cpu1 `bx 0x10` -> crash -> cpu1 dark (no
+        // scheduler_start, GIC iface off, ignores SGI probe, cpu1rdy=0, Mecha assert).
         MEM(0xBFE01FC4) = MAIN_FIRMWARE_ADDR | 0x1;
     #elif defined(CONFIG_DIGIC_X)
         // Digic X uses similar 1st stage loader to Digic 8 "new style" one.
@@ -342,10 +412,12 @@ cstart( void )
         MEM(0xBFE01FC4) = 0x10;         // unknown meaning
         MEM(0xBFE01FC8) = MAIN_FIRMWARE_ADDR;  // pointer used by 2nd core to run 2nd stage loader
     #endif
+    M50II_STAGE(6);
 
     // Newer models do it after writing 2nd core boot address
     // It won't hurt on those who don't.
     sync_caches();
+    M50II_STAGE(7);
 
     #if 0
       qprint("[boot] jump to main firmware: "); qprintn(MAIN_FIRMWARE_ADDR); qprint("\n");

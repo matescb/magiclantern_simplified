@@ -450,7 +450,7 @@ static int get_default_white_level()
      -437, 10000,    1336, 10000,   5131, 10000
 #endif
 
-#ifdef CONFIG_M50 // from https://github.com/LibRaw/LibRaw src/tables/colordata.cpp
+#if defined(CONFIG_M50) || defined(CONFIG_M50mk2) // from https://github.com/LibRaw/LibRaw src/tables/colordata.cpp (M50mk2 reuses M50; verify)
     // { LIBRAW_CAMERAMAKER_Canon, "EOS M50", 0, 0,
     //   { 8532,-701,-1167,-4095,11879,2508,-797,2424,7010 } },
     #define CAM_COLORMATRIX1 \
@@ -618,7 +618,7 @@ static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685,
 /** M50 data missing from DxO.
  *  For now I just copied R
  */
-#ifdef CONFIG_M50
+#if defined(CONFIG_M50) || defined(CONFIG_M50mk2) // M50mk2 reuses M50 DR curve until measured
 static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685, 599};
 #endif
 

@@ -159,11 +159,23 @@ prop_unregister_handlers()
 #endif
 }
 
+/* Weak hook: return 0 when Canon's property manager is not ready yet, so we skip
+ * prop_register_slave instead of tripping its "Property/PropertyMgr.c:484" assert
+ * (which fires when the PropertyMgr manager object is still NULL). Default: always
+ * ready. Overridden per-platform where ml_init can outrun Canon's PropertyMgr init
+ * (e.g. M50 II, whose Canon subsystem bring-up is HW-dependent). */
+__attribute__((weak)) int ml_canon_propmgr_ready(void) { return 1; }
+
 static void
 prop_register_handlers()
 {
     if (global_token == NULL)
     {
+        if (!ml_canon_propmgr_ready())
+        {
+            DryosDebugMsg(0, 15, "prop_register_handlers: Canon PropertyMgr not ready, skipping registration");
+            return;
+        }
         prop_register_slave(
             property_list,
             actual_num_properties,

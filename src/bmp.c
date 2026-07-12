@@ -261,6 +261,12 @@ void refresh_yuv_from_rgb(void)
     // trigger Ximr to render to OSD from RGB buffer
 #ifdef CONFIG_DIGIC_VI
     XimrExe((void *)XIMR_CONTEXT);
+#elif defined(CONFIG_M50mk2)
+    /* [M50II] The M50 II compositor uses a chunked mzrm submit (per-chunk XimrExe), not a
+     * single XimrExe(XIMR_CONTEXT). RE'd + HW-proven (iteration 2c/3): raising the VMIX
+     * primary-ctx dirty flag makes Canon's own display task recomposite our layer. This is
+     * the recompose trigger the dedicated-layer OSD (m50ii_osd_init) relies on. */
+    *(volatile uint32_t *)(0x00011294 + 0x18) = 1;
 #else
     take_semaphore(winsys_sem, 0);
     XimrExe((void *)XIMR_CONTEXT);
