@@ -1701,17 +1701,23 @@ static void m50ii_heartbeat_task(void)   /* Phase-1 liveness: ticks => scheduler
 #if defined(CONFIG_M50mk2)
 extern void m50ii_handle_canon_gui_event(uint32_t type, uint32_t p1, uint32_t p2);  /* gui.c menu bridge */
 #endif
+#ifndef M50II_INPUT_TRACE
+#define M50II_INPUT_TRACE 0   /* [keeper: OFF] set 1 to log every button ([ML] BTN) + a periodic
+                               * liveness/counter line ([ML] in.hb) over UART during HW bring-up. */
+#endif
 static void m50ii_input_task(void)
 {
-    extern void m50ii_uart_str(const char *);
-    char b[12];
     volatile uint32_t *widx = (volatile uint32_t *)0x0000543C;   /* gui_main_struct+0x14 = ring write index */
     const uint32_t RING  = 0x000BAE08;                            /* DAT_e021e034 = ring base */
     const uint32_t NSLOT = 0x401;
     uint32_t last = *widx;
+#if M50II_INPUT_TRACE
+    extern void m50ii_uart_str(const char *);
+    char b[12];
     uint32_t total = 0, n_t0 = 0, n_t2 = 0, n_t4 = 0, n_ot = 0;
     int lc = 0;
     m50ii_uart_str("[ML] input: watching GUI event ring @0xBAE08 (widx@0x543C)\n");
+#endif
     while (1)
     {
         uint32_t cur = *widx;
@@ -1722,12 +1728,10 @@ static void m50ii_input_task(void)
 
             /* Skip the idle keep-alive (type==0, p1==0xA7, ~every 3s): carries no input. */
             int is_idle = (type == 0 && p1 == 0xA7);
+#if M50II_INPUT_TRACE
             if (!is_idle)
             {
                 total++;
-                /* type-0 = BUTTON events: log EVERY one UNBOUNDED (rare, and exactly what we need).
-                 * The boot-time flood is type 2/4 -- only COUNT those (in the in.hb line) so they can
-                 * never again exhaust the button trace (root cause of "blind to the FN press"). */
                 if (type == 0)
                 {
                     n_t0++;
@@ -1739,7 +1743,7 @@ static void m50ii_input_task(void)
                 else if (type == 4) n_t4++;
                 else                n_ot++;
             }
-
+#endif
 #if defined(CONFIG_M50mk2)
             /* Drive the ML menu: FN toggles it, nav keys navigate (bridge is gated to gui_menu_shown). */
             if (!is_idle)
@@ -1747,8 +1751,8 @@ static void m50ii_input_task(void)
 #endif
             last = (last + 1) % NSLOT;
         }
-        /* input-alive heartbeat + ring stats every ~3s (150 * 20ms): proves the task still polls,
-         * shows whether ANY button (t0) arrived, and exposes the ring rate / a wrap-overrun. */
+#if M50II_INPUT_TRACE
+        /* input-alive heartbeat + ring stats every ~3s (150 * 20ms). */
         if (++lc >= 150)
         {
             lc = 0;
@@ -1760,6 +1764,7 @@ static void m50ii_input_task(void)
             m50ii_uart_str(" ot=");              m50ii_uart_str(m50ii_hex(b, n_ot));
             m50ii_uart_str("\n");
         }
+#endif
         msleep(20);
     }
 }

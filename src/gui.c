@@ -142,7 +142,7 @@ extern struct gui_main_struct gui_main_struct;
                                        * events reach handle_buttons -> ML menus become interactive. */
 #endif
 #ifndef M50II_GUI_TRACE
-#define M50II_GUI_TRACE 1   /* [2026-07-11] ON for the first override-on HW boot: log every received GUI
+#define M50II_GUI_TRACE 0   /* [2026-07-11] ON for the first override-on HW boot: log every received GUI
                              * event's type/param over UART to (a) confirm events flow through the
                              * re-enabled override without crashing and (b) capture real M50 II button
                              * keycodes for the gui.h placeholder fix. Set back to 0 once recorded. */
@@ -160,7 +160,7 @@ extern struct gui_main_struct gui_main_struct;
                                    * forwarding everything else to Canon. */
 #endif
 #ifndef M50II_GUI_DIAG
-#define M50II_GUI_DIAG 1   /* [2026-07-12 iter12] Instrument ml_gui_main_task to find why the (byte-correct)
+#define M50II_GUI_DIAG 0   /* [2026-07-12 iter12] Instrument ml_gui_main_task to find why the (byte-correct)
                             * clone drains ZERO events: print the queue handle *(gui_main_struct+0x1c) at
                             * ENTER, then for the first 16 loops print msg_queue_receive's return code + the
                             * event ptr. Tells us whether the clone (a) runs at all, (b) reads a valid queue
@@ -175,7 +175,7 @@ extern struct gui_main_struct gui_main_struct;
                               * ML menu; nav keys drive it. 0 = feature off (bridge becomes a no-op). */
 #endif
 #ifndef M50II_MENU_INPUT_TRACE
-#define M50II_MENU_INPUT_TRACE 1   /* UART echo of translated menu-input events during HW bring-up. */
+#define M50II_MENU_INPUT_TRACE 0   /* UART echo of translated menu-input events during HW bring-up. */
 #endif
 #if M50II_GUI_TRACE || M50II_GUI_DIAG || M50II_MENU_INPUT_TRACE
 extern void m50ii_uart_str(const char *);

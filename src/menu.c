@@ -5835,28 +5835,11 @@ menu_task( void* unused )
                     gui_state == GUISTATE_MENUDISP ||
                     (!DISPLAY_IS_ON && CURRENT_GUI_MODE != GUIMODE_PLAY);
 #if defined(CONFIG_M50mk2)
-                /* [2026-07-12 bring-up] On M50 II the ML menu opened+drew via FN but auto-closed in
-                 * ~1s: one of these conditions trips falsely (likely gui_state==MENUDISP, which ML's
-                 * own SetGUIRequestMode(GUIMODE_MENU) piggyback sets, or a garbage shooting_mode).
-                 * SUPPRESS the auto-close and log WHICH condition tripped, so the menu stays open for
-                 * input testing and we learn the real reason in one boot. Replace with a targeted
-                 * guard once known. */
-                if (menu_want_close)
-                {
-                    extern void m50ii_uart_str(const char *);
-                    static int menu_close_logged = 0;
-                    if (!menu_close_logged)
-                    {
-                        menu_close_logged = 1;
-                        m50ii_uart_str("[ML] menu: auto-close SUPPRESSED (M50mk2); reason(s):");
-                        if (sensor_cleaning)                    m50ii_uart_str(" sensor_cleaning");
-                        if (initial_mode != shooting_mode)      m50ii_uart_str(" mode-changed");
-                        if (gui_state == GUISTATE_MENUDISP)     m50ii_uart_str(" gui_state=MENUDISP");
-                        if (!DISPLAY_IS_ON && CURRENT_GUI_MODE != GUIMODE_PLAY) m50ii_uart_str(" display-off");
-                        m50ii_uart_str("\n");
-                    }
-                    menu_want_close = 0;
-                }
+                /* [2026-07-12] On M50 II these conditions trip falsely (gui_state==MENUDISP is set by
+                 * Canon while the ML menu overlay is up), which would auto-close the menu after ~1s.
+                 * The ML menu is a pure overlay here (piggyback/SetGUIRequestMode no-op'd), so this
+                 * guard is not meaningful -- suppress the auto-close and let FN drive open/close. */
+                menu_want_close = 0;
 #endif
                 if (menu_want_close)
                 {
