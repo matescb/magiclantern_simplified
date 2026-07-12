@@ -175,13 +175,7 @@ static int font_read(FILE* fd, unsigned char *dest, int len)
     // Return actual bytes read
     int bytes_read = 0;
 
-    /* Canon's FIO_ReadFile can DMA in whole 512-byte sectors, writing past a len-sized destination
-     * (up to the next sector boundary). On the M50 Mark II this trampled the allocator's guard zone
-     * -> "memory overflow @ rbf_font.c:178". Over-allocate the uncacheable read buffer to the sector
-     * boundary so the rounded-up read always fits; we still copy exactly `len` bytes into `dest`.
-     * Harmless on cameras whose FIO reads exactly `len` (just a slightly larger transient buffer). */
-    int alloc_len = (len + 0x1FF) & ~0x1FF;
-    unsigned char *ubuffer = fio_malloc(alloc_len);
+    unsigned char *ubuffer = fio_malloc(len);
     if (ubuffer)
     {
         // Read block and copy to dest
