@@ -666,6 +666,15 @@ static void *memcheck_malloc(unsigned int len, const char *file, unsigned int li
     int requires_dma = flags & MEM_DMA;
     if (requires_dma)
     {
+        /* [2026-07-12 M50 Mark II] Canon's _FIO_ReadFile can DMA in whole 512-byte sectors, writing
+         * up to a sector PAST the requested count into a DMA buffer -- trampling this block's trailing
+         * guard zone and the adjacent heap. On the M50 II this surfaced as memcheck "overflow"
+         * (rbf_font.c:178), a truncated config key ("dof.info.coc.apsc"->"...ap"), a Debug-menu abort
+         * (mem_total_display deref of a corrupted entry), and layout-dependent corruption that broke
+         * button input. Round DMA allocations up to the sector size so a rounded-up read always fits
+         * before the guard. Consistent everywhere: hdr->length, guard fill and accounting all use the
+         * rounded len below; the caller simply gets a slightly larger (>= requested) buffer. */
+        len = (len + 0x1FF) & ~0x1FF;
         ptr = (unsigned int)allocators[allocator_index].malloc_dma(len + 2 * MEM_SEC_ZONE);
     }
     else
