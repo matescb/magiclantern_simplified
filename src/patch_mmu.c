@@ -52,6 +52,19 @@
 // Canon ~568KB. Keep this at the minimum: 2 pages -> _bss_end ~0x1603f4, ~500KB left for
 // Canon. DO NOT raise without re-checking the user_mem headroom; enabling the 0xF0 mirror
 // (a 3rd page) needs that headroom re-verified on HW first.
+// *** 1 PAGE as of 2026-07-12 (RAW-VIDEO R0, docs/31). *** The prior note below is retained
+// for history. Raw video re-enables CONFIG_TCC + CONFIG_MODULES (mlv_lite is a module), which
+// adds back ~94KB and pushes _bss_end to 0x15fe00 -> with 2 pages Canon is starved and boot
+// halts before pre.0 (boot-d678.c:938 trace_blink_forever(14)) -- REPRODUCED IN QEMU 2026-07-12
+// (jump to autoexec, 86 cache ops, no pre.0). Per this note's own prescription ("If you
+// re-enable TCC/modules you MUST drop this back to 1 or find other reclaim"), MMU_MAX_REMAP_PAGES
+// is now 1: INIT1_HIJACK keeps the single page; the GraphicsConvertPosType:9 NOP (which needed
+// page 2) is dropped as REDUNDANT -- big.5 was root-fixed by the _alloc_dma_memory C wrappers in
+// function_overrides.c (fio_malloc no longer derails into GCPT), the NOP was belt-and-suspenders.
+// 1 page brings _bss_end to ~0x14f9f0, matching the known-good 0x14fa00. HW WATCH: if the GCPT:9
+// assert re-appears at big.5 on hardware, re-enable the non-fatal assert handler as the net, or
+// find 64K of other reclaim to restore page 2.
+// --- PRIOR (2-page, modules-off) NOTE, kept for history ---
 // *** 2 PAGES, PAID FOR BY RECLAIM 2026-07-11. *** Growing the pool alone starves Canon
 // (HW: 2 pages @ _bss_end 0x15fe00 left Canon ~490KB -> DryOS pool panic before pre.0).
 // The fix is NOT to shrink the pool but to RECLAIM the 64K elsewhere: M50mk2's Makefile
@@ -62,7 +75,7 @@
 // the non-fatal handler hit on HW (handler kept as a general net for other asserts). If you
 // re-enable TCC/modules you MUST drop this back to 1 or find other reclaim, or Canon panics.
 #ifndef MMU_MAX_REMAP_PAGES
-#define MMU_MAX_REMAP_PAGES 2
+#define MMU_MAX_REMAP_PAGES 1
 #endif
 static uint8_t generic_mmu_space[MMU_MAX_REMAP_PAGES * MMU_PAGE_SIZE + MMU_L1_TABLE_SIZE
                                  + 0x300 + MMU_MAX_REMAP_PAGES * MMU_L2_TABLE_SIZE

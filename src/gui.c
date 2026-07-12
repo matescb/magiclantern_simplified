@@ -213,6 +213,9 @@ static void m50ii_gui_hex(const char *label, uint32_t a, uint32_t b)
 #define M50II_KEY_UP     0x40   /* HW: 4-way pad UP (ladder: RIGHT 0x3C/LEFT 0x3E/UP 0x40/DOWN 0x42) */
 #define M50II_KEY_DOWN   0x42   /* HW: 4-way pad DOWN -- verify direction, swap with UP if inverted */
 #define M50II_KEY_FN     0x22   /* was 0x4A; FN press captured as 0x22 here -> opens/closes ML menu */
+#define M50II_KEY_VIEW   0x12   /* HW 2026-07-12: VIEW/playback press=0x12, release=0x13 (p2=0).
+                                 * -> BGMT_PRESS_SET (toggle values / enable modules); complements
+                                 * SET/Q(0x0A)->BGMT_Q(submenu). Captured via [ML] BTN trace outside ML. */
 #define M50II_KEY_DIAL   0xB7   /* control-dial rotation; direction in the struct *p2 (Phase 3 probe).
                                  * NOTE 0xB7 ALSO fires as background -- real up/down decode is deferred. */
 /* 0x9F (old PLAY) intentionally DROPPED: it is background noise in this mode and would spam the menu. */
@@ -296,6 +299,10 @@ void m50ii_handle_canon_gui_event(uint32_t type, uint32_t p1, uint32_t p2)
          * BGMT_PRESS_SET (mode 3) only toggles/edits and does NOT enter submenus -- that showed the
          * item hint instead of descending, which read as "help". Values still change via LEFT/RIGHT. */
         case M50II_KEY_SET:   bgmt = BGMT_Q;           break;
+        /* VIEW/playback -> BGMT_PRESS_SET (menu_entry_select mode 3): toggles/edits a value in
+         * place and enables modules (module_menu .select). SET/Q above stays BGMT_Q for submenus.
+         * This gives the M50 II both actions ML normally splits across two buttons. */
+        case M50II_KEY_VIEW:  bgmt = BGMT_PRESS_SET;   break;
         case M50II_KEY_LEFT:  bgmt = BGMT_PRESS_LEFT;  break;
         case M50II_KEY_RIGHT: bgmt = BGMT_PRESS_RIGHT; break;
         case M50II_KEY_UP:    bgmt = BGMT_PRESS_UP;    break;

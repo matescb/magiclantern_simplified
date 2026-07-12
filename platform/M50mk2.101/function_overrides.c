@@ -120,15 +120,10 @@ void AbortEDmac(unsigned int channel)
    return;
 }
 
-void RegisterEDmacCompleteCBR(int channel, void (*cbr)(void*), void* cbr_ctx)
-{
-   return;
-}
-
-void UnregisterEDmacCompleteCBR(int channel)
-{
-   return;
-}
+/* [RAW-VIDEO R1, docs/31] RegisterEDmacCompleteCBR / UnregisterEDmacCompleteCBR are no
+ * longer NOP here -- they resolve to the real gang100 stubs (0xe05b7c48 / 0xe05b7f68)
+ * used by platform/edmac-d8.c's mem2mem copy. See stubs.S. The Abort/Pop CBRs below
+ * stay NOP (the mem2mem path does not use them). */
 
 void RegisterEDmacAbortCBR(int channel, void (*cbr)(void*), void* cbr_ctx)
 {
@@ -155,9 +150,18 @@ void _EngDrvOut(uint32_t reg, uint32_t value)
    return;
 }
 
+/* [RAW-VIDEO R1, docs/31] Real DIGIC-8 shamem_read: no shadow memory on D8, MMIO reads
+ * are direct. Guard to the 0xDxxxxxxx EDMAC/engine MMIO range (raw_lv_edmac, FPS regs,
+ * etc.); log + return 0 for anything else (likely legacy D4/D5 callers). Ported from
+ * M50.110 function_overrides.c. */
 uint32_t shamem_read(uint32_t addr)
 {
-   return 0;
+    if (addr >> 28 != 0xD)
+    {
+        DryosDebugMsg(0, 15, "shamem_read from %08x - aborted", addr);
+        return 0;
+    }
+    return *(uintptr_t*)addr;
 }
 
 void _engio_write(uint32_t* reg_list)
@@ -165,10 +169,8 @@ void _engio_write(uint32_t* reg_list)
    return;
 }
 
-unsigned int UnLockEngineResources(struct LockEntry *lockEntry)
-{
-   return 0;
-}
+/* [RAW-VIDEO R1, docs/31] UnLockEngineResources is no longer NOP -- it resolves to the
+ * real gang100 stub (0xe05be740), used by edmac-d8.c edmac_memcpy_res_unlock(). */
 
 /* Canon's PropertyMgr manager object pointer lives at RAM 0x4FF4 (RE'd from the
  * prop_register_slave assert "Property/PropertyMgr.c:484", which fires when it is

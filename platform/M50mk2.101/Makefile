@@ -21,17 +21,20 @@ CFLAGS_PLATFORM = -mthumb -mlong-calls
 PLATFORM_ARCH = armv7-a
 
 ML_BOOT_OBJ = boot-d678.o
-ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/function_overrides.o
+ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/function_overrides.o edmac-d8.o
 
-# [M50II 2026-07-11] Bring-up memory reclaim: disable the on-cam TCC compiler and the
-# module system (~94KB text+bss). Frees enough of _bss_end to restore a 2-page MMU remap
-# pool (MMU_MAX_REMAP_PAGES=2 in patch_mmu.c) so the GraphicsConvertPosType:9 NOP can be
-# applied cleanly WITHOUT growing past the known-good _bss_end (0x14fa00) that starves
-# Canon's DryOS pool. Neither is needed to reach big.8 (modules load after big.8; TCC only
-# compiles them). Re-enable once a permanent memory layout is designed. Overrides the
-# `?=` defaults in ../Makefile; must precede the include.
-CONFIG_TCC     := n
-CONFIG_MODULES := n
+# [M50II 2026-07-12] RAW-VIDEO R0 (docs/31): re-enable the module system + on-cam TCC linker.
+# mlv_lite is a module, and CONFIG_TCC is required by the module loader to relocate/link .mo
+# files at load time, so raw video cannot load without both. This grows _bss_end by ~94KB from
+# the modules-off known-good 0x14fa00 (toward ~0x167000), between the known-good 2-page value
+# (0x15fe00, Canon ~490KB left) and the pages=4 panic value (0x180700, DryOS pool starved).
+# => MEMORY GATE: on cold-boot watch for a DryOS pool panic (LED-13, no pre.0). If it panics,
+#    reduce ml_reserved_mem (boot-d678.c) or drop MMU_MAX_REMAP_PAGES to 1 (patch_mmu.c) before
+#    adding mlv_lite. modules.included is kept minimal (bench, file_man) to measure headroom
+#    first. The module_* NOP stubs in function_overrides.c self-exclude via #if !CONFIG_MODULES.
+# Overrides the `?=` defaults in ../Makefile; must precede the include.
+CONFIG_TCC     := y
+CONFIG_MODULES := y
 
 include ../Makefile
 .DEFAULT_GOAL := $(BUILD_DIR)/cam_complete

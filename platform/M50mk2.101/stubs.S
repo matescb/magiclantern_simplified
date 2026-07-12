@@ -363,6 +363,27 @@ THUMB_FN(0xE05B0EEA,  ClearEventFlag)                       /* +0x2E from SetEve
 THUMB_FN(0xE05B0CC0,  WaitForAnyEventFlag)                  /* push{r1-r7,lr}; interrupt-ctx check; OR-wait */
 THUMB_FN(0xE05B0D40,  WaitForAllEventFlag)                  /* +0x80 from WaitForAny; AND-wait */
 
+/** DIGIC 8 EDMAC mem2mem engine (RAW-VIDEO R1, docs/30) — resolved+verified on gang100 1.0.1.
+ *  Called by platform/edmac-d8.c. All Thumb. Addresses from the 61-agent RE workflow + closer. **/
+THUMB_FN(0xe05b848e,  edmac_set_address)                    /* leaf: writes addr into chan desc +0xa0 (twin of set_size) */
+THUMB_FN(0xe05b8862,  edmac_set_size)                       /* leaf: writes transfer size into chan desc */
+THUMB_FN(0xe05b88fc,  edmac_set_transfer_mode)              /* set chan transfer mode */
+THUMB_FN(0xe05b9690,  StartEDmac_maybe)                     /* start an EDMAC channel */
+THUMB_FN(0xe05b95e4,  ConnectReadEDmac_maybe)               /* connect a read chan (single arg on D8) */
+THUMB_FN(0xe05b96b8,  edmac_reset_channel)                  /* reset an EDMAC channel */
+THUMB_FN(0xe05b5720,  edmac_reset_boomer_vdkick)            /* reset Boomer VdKick for a channel */
+THUMB_FN(0xe0683ca0,  edmac_select_boomer)                  /* select Boomer (selector 0x373f0126) */
+THUMB_FN(0xe05b7c48,  RegisterEDmacCompleteCBR)             /* register EDMAC completion CBR (was NOP in fn_overrides) */
+THUMB_FN(0xe05b7f68,  UnregisterEDmacCompleteCBR)           /* unregister EDMAC completion CBR */
+THUMB_FN(0xe05b8f38,  edmac_reset_packunpack_mode)          /* reset pack/unpack mode */
+THUMB_FN(0xe05b80c2,  edmac_stop_boomer_maybe)              /* stop Boomer for a write channel */
+THUMB_FN(0xe06b934e,  PwrMng_WakeSubChips)                  /* power on EDMAC sub-chips {0,7}; MUST precede EDMAC MMIO */
+THUMB_FN(0xe06b937c,  PwrMng_SuspendSubChips)               /* power off EDMAC sub-chips */
+THUMB_FN(0xE05BE4BE,  CreateResLockEntry)                   /* create engine resource lock entry */
+THUMB_FN(0xe05be8a6,  LockEngineResources)                  /* lock engine resources */
+THUMB_FN(0xe05be740,  UnLockEngineResources)                /* unlock engine resources (was NOP in fn_overrides) */
+THUMB_FN(0xe05cc5fe,  CreateEventFlag_strictly)             /* create DryOS event flag (mem2mem completion sync) */
+
 /** UART sink (F6) — char -> FIFO (see docs/15 UART section) **/
 THUMB_FN(0xE007D814,  uart_write_bytes)                     /* physical UART writer: UART_TX 0xC0800000, poll status 0xC0800014 bit1 (TX ready) */
 THUMB_FN(0xE027A5A2,  uart_console_sink)                    /* console-level sink; push{r3,lr}; forwards to writer */

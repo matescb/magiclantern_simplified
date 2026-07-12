@@ -284,9 +284,60 @@ void guimode_test()
 }
 #endif
 
+#if defined(CONFIG_M50mk2) && defined(CONFIG_EDMAC_MEMCPY_D8)
+/* [RAW-VIDEO R1, docs/31] no-op CBR for the EDMAC mem2mem self-test
+ * (edmac-d8.c edmac_copy_rectangle_cbr_start calls cbr_w(NULL) at the end). */
+static void edmac_selftest_nop_cbr(void *unused) { (void)unused; }
+#endif
+
 static void run_test()
 {
     DryosDebugMsg(0, 15, "run_test fired");
+
+#if defined(CONFIG_M50mk2) && defined(CONFIG_EDMAC_MEMCPY_D8)
+    /* [RAW-VIDEO R1, docs/31] DIGIC-8 EDMAC mem2mem self-test: copy a small buffer
+     * RAM->RAM through the ported edmac-d8.c engine and verify byte-for-byte. Proves the
+     * EDMAC engine + the 18 resolved stubs work before wiring raw LiveView. Trigger:
+     * ML menu -> Debug -> "Don't click me". Result -> UART / log0000.log + NotifyBox.
+     * All buffer access is via UNCACHEABLE() so CPU cache and the DMA see the same RAM. */
+    {
+        extern void  edmac_memcpy_res_lock(void);
+        extern void  edmac_memcpy_res_unlock(void);
+        extern void* edmac_copy_rectangle_cbr_start(void *dst, void *src,
+            int src_width, int src_x, int src_y, int dst_width, int dst_x, int dst_y,
+            int w, int h, void (*cbr_r)(void*), void (*cbr_w)(void*), void *cbr_ctx);
+
+        const int W = 512, H = 8, N = W * H;   /* 4 KB region */
+        uint8_t *src = (uint8_t *)fio_malloc(N);
+        uint8_t *dst = (uint8_t *)fio_malloc(N);
+        if (src && dst)
+        {
+            volatile uint8_t *usrc = (volatile uint8_t *)UNCACHEABLE(src);
+            volatile uint8_t *udst = (volatile uint8_t *)UNCACHEABLE(dst);
+            for (int i = 0; i < N; i++) { usrc[i] = (uint8_t)(i * 7 + 3); udst[i] = 0; }
+
+            edmac_memcpy_res_lock();
+            edmac_copy_rectangle_cbr_start((void *)udst, (void *)usrc,
+                                           W, 0, 0, W, 0, 0, W, H,
+                                           edmac_selftest_nop_cbr, edmac_selftest_nop_cbr, 0);
+            edmac_memcpy_res_unlock();
+
+            int mism = 0, first = -1;
+            for (int i = 0; i < N; i++)
+                if (udst[i] != (uint8_t)(i * 7 + 3)) { mism++; if (first < 0) first = i; }
+            DryosDebugMsg(0, 15, "[R1] EDMAC mem2mem self-test %s: N=%d mism=%d first=%d",
+                          mism ? "FAIL" : "PASS", N, mism, first);
+            NotifyBox(5000, "EDMAC mem2mem: %s (mism %d)", mism ? "FAIL" : "PASS", mism);
+        }
+        else
+        {
+            DryosDebugMsg(0, 15, "[R1] EDMAC self-test alloc FAIL src=%x dst=%x",
+                          (uint32_t)src, (uint32_t)dst);
+        }
+        if (src) fio_free(src);
+        if (dst) fio_free(dst);
+    }
+#endif
 
     // This is useful for devs, via normal users, as it dumps the internal
     // log to disk as log0000.log.  This holds DryosDebugMsg() messages,

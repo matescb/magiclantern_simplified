@@ -1702,7 +1702,10 @@ static void m50ii_heartbeat_task(void)   /* Phase-1 liveness: ticks => scheduler
 extern void m50ii_handle_canon_gui_event(uint32_t type, uint32_t p1, uint32_t p2);  /* gui.c menu bridge */
 #endif
 #ifndef M50II_INPUT_TRACE
-#define M50II_INPUT_TRACE 0   /* [keeper: OFF] set 1 to log every button ([ML] BTN) + a periodic
+#define M50II_INPUT_TRACE 0   /* [RAW-VIDEO: keycode captured = VIEW 0x12, OFF 2026-07-12] was ON
+                                 to capture the VIEW/PLAY button keycode for the
+                                 VIEW->toggle(BGMT_PRESS_SET) menu fix; done (gui.c wired), now OFF.
+                               [keeper: OFF] set 1 to log every button ([ML] BTN) + a periodic
                                * liveness/counter line ([ML] in.hb) over UART during HW bring-up. */
 #endif
 static void m50ii_input_task(void)

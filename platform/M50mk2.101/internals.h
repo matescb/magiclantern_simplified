@@ -36,5 +36,11 @@
 
 #define CONFIG_MALLOC_STRUCT_V2
 
+/* [RAW-VIDEO R1, docs/31] DIGIC 8 EDMAC mem2mem engine (platform/edmac-d8.c).
+ * Selects the hand-rolled D8 boomer path (ported from M50.110) instead of the
+ * DIGIC-4/5 generic src/edmac-memcpy.c (gated by CONFIG_EDMAC_MEMCPY, which we do
+ * NOT define, so no double definition of edmac_copy_rectangle_cbr_start). */
+#define CONFIG_EDMAC_MEMCPY_D8
+
 #define CONFIG_TASK_STRUCT_V2_SMP
 #define CONFIG_TASK_ATTR_STRUCT_V5
