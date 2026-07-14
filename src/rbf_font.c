@@ -175,10 +175,24 @@ static int font_read(FILE* fd, unsigned char *dest, int len)
     // Return actual bytes read
     int bytes_read = 0;
 
-    unsigned char *ubuffer = fio_malloc(len);
+    /* [M50II 2026-07-13] Canon's _FIO_ReadFile DMAs in whole 512-byte sectors and can write
+     * PAST the requested length -- HW showed a memcheck "overflow 527/512" here (rbf_font.c:178),
+     * i.e. 15 bytes past a 512-byte buffer, into the fio_malloc guard. mem.c already rounds DMA
+     * allocations up to a sector, but the overshoot still reached past the rounded end, corrupting
+     * the adjacent heap (mem.c notes this same corruption "broke button input" -> the flaky menu
+     * nav). Over-allocate the uncached buffer to the next sector boundary PLUS one spare sector so
+     * any sector-granular overshoot lands in slack, not the guard. Only `len` bytes are copied out. */
+    /* HW: Canon's _FIO_ReadFile DMAs whole SD CLUSTERS, overrunning a small buffer by up to a
+     * cluster -- observed 25755 bytes actually written for a 48-byte header read. Sector-margin
+     * pads (+0x200/+0x800) were nowhere near enough. Size the scratch buffer to hold a full
+     * cluster: at least 64KB, which exceeds any FAT cluster this card uses. Only `len` bytes are
+     * copied to dest; the buffer is freed right after, so the transient 64KB is fine. */
+    int alloc_len = ((len + 0x1FF) & ~0x1FF) + 0x800;
+    if (alloc_len < 0x10000) alloc_len = 0x10000;
+    unsigned char *ubuffer = fio_malloc(alloc_len);
     if (ubuffer)
     {
-        // Read block and copy to dest
+        // Read block and copy to dest (read only the real length; buffer has sector slack)
         bytes_read += FIO_ReadFile(fd, ubuffer, len);
         memcpy(dest, ubuffer, len);
         fio_free(ubuffer);

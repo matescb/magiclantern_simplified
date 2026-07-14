@@ -1067,6 +1067,12 @@ int raw_update_params_work()
         skip_right  = zoom ? 0 : 8;
         #endif
 
+        #if defined(CONFIG_M50) || defined(CONFIG_M50mk2)
+        // FIXME: 1080p values (ported from M50 mk1); add 4K/crop skips later
+        skip_top    = 34;
+        skip_left   = 88;
+        #endif
+
         dbg_printf("LV raw buffer: %x (%dx%d)\n", raw_info.buffer, width, height);
         dbg_printf("Skip left:%d right:%d top:%d bottom:%d\n", skip_left, skip_right, skip_top, skip_bottom);
 #endif
@@ -2644,6 +2650,17 @@ void raw_lv_request_bpp(int bpp)
 //            MODE_12BIT = 0x300, // likely 8 or 16.  Alternates high and low values, could fit bayer or UYUV etc
 //            MODE_12BIT = 0x2000, // possibly 24 bit?
         };
+    #elif defined(CONFIG_DIGIC_VIII)
+        // [M50mk2 RAW-VIDEO R2, docs/31] generic D8 branch (M50 mk1 does the same). PACK32_MODE
+        // + the bit-depth modes are placeholders copied from 200D via the working mk1 raw path;
+        // EngDrvOut is a NOP here, so bit depth defaults to Canon's stream — validate on-target.
+        enum {
+            MODE_16BIT = 0x20,
+            MODE_14BIT = 0x20, // default value
+            MODE_12BIT = 0x10,
+            MODE_10BIT = 0x0,
+        };
+        const uint32_t PACK32_MODE = 0xd0008094; // wrong, copy of 200d — tune later
     #endif
     const uint32_t modes[] = { MODE_10BIT, MODE_12BIT, MODE_14BIT, MODE_16BIT};
 

@@ -200,15 +200,36 @@ static void dump_img_task(void* priv, int unused)
     snprintf(pattern + path_len, sizeof(pattern) - path_len, "RAW-%%03d.DNG", 0);
     get_numbered_file_name(pattern, 999, filename, sizeof(filename));
     
+#if defined(CONFIG_M50mk2)
+    /* [RAW-VIDEO R2 diag v2, docs/31] HW showed params=0 buf=0 => raw_lv_edmac->ram_addr
+     * (base RAW_LV_EDMAC_CHANNEL_ADDR 0xd0420200, ram_addr ~+0xA4) read 0: Canon isn't
+     * publishing a raw buffer there in the tested mode. Localize: show mode (movie vs photo
+     * matters -- raw LV wants movie), dump the register block, and RETRY after a few LV
+     * frames (Canon may publish the addr a few frames after lv_save_raw). */
+    NotifyBox(3000, "R2: lv=%d movie=%d dispsize=%d", lv, is_movie_mode(), lv_dispsize);
+    msleep(2500);
+    if (lv) raw_lv_request();
+    volatile uint32_t *rr = (volatile uint32_t *)RAW_LV_EDMAC_CHANNEL_ADDR;
+    NotifyBox(6000, "R2 reg 0420200:\n+00=%x +80=%x\n+A0=%x +A4=%x",
+              (unsigned)rr[0], (unsigned)rr[0x20], (unsigned)rr[0x28], (unsigned)rr[0x29]);
+    msleep(5000);
+    int m50ii_rup = raw_update_params();
+    if (!m50ii_rup) { wait_lv_frames(5); m50ii_rup = raw_update_params(); }  /* retry after frames */
+    NotifyBox(6000, "R2 raw: params=%d buf=%x\n%dx%d fs=%d", m50ii_rup,
+              (unsigned)raw_info.buffer, raw_info.width, raw_info.height, raw_info.frame_size);
+    msleep(5000);
+    if (m50ii_rup)
+#else
     if (lv) raw_lv_request();
     if (raw_update_params())
+#endif
     {
         /* first frames right after enabling the raw buffer might be corrupted, figure out why */
         /* todo: fix it in the raw backend */
         wait_lv_frames(3);
         raw_set_dirty();
         raw_update_params();
-        
+
         /* make a copy of the raw buffer, because it's being updated while we are saving it */
         void* buf = malloc(raw_info.frame_size);
         if (buf)
@@ -218,6 +239,10 @@ static void dump_img_task(void* priv, int unused)
             local_raw_info.buffer = buf;
             save_dng(filename, &local_raw_info);
             free(buf);
+#if defined(CONFIG_M50mk2)
+            NotifyBox(4000, "R2 raw: save_dng done");
+            msleep(2500);
+#endif
         }
     }
     if (lv) raw_lv_release();

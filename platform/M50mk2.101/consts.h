@@ -82,6 +82,15 @@
  */
 #define LV_OVERLAYS_MODE MEM(0x13CC8)
 
+/* [RAW-VIDEO R2, docs/31 + docs/30] DIGIC 8 raw LiveView registers.
+ * RAW_LV_EDMAC_CHANNEL_ADDR: write-EDMAC channel MMIO Canon fills after lv_save_raw(1);
+ *   raw.c reads raw_lv_edmac here to discover raw_info.buffer. Confirmed on 1.0.1 (docs/30),
+ *   same value as M50 mk1. Without this, raw.c falls through to the wrong DIGIC-V default.
+ * SHAD_GAIN_REGISTER: PLACEHOLDER carried from 200D/M50 mk1 (0 xrefs on our ROM); affects
+ *   highlight gain only, tuned empirically on-target (docs/30 deferred). */
+#define RAW_LV_EDMAC_CHANNEL_ADDR 0xd0420200
+#define SHAD_GAIN_REGISTER        0xd0008030 // WRONG/placeholder from 200D — tune later
+
 /* There's no `DispOperator_PropertyMasterSetDisplayTurnOffOn()` like on EOSR.
  * PropID 80040083 is also not referenced anywhere.
  * GUILockTask does DISP_MuteOnOSDLineVram() and DISP_MuteOnOSDPanelVram()

@@ -4881,7 +4881,23 @@ menu_redraw_do()
     #ifdef CONFIG_VXWORKS   
     set_ml_palette();    
     #endif
+#if defined(CONFIG_M50mk2)
+    /* [M50II 2026-07-13] Composite NOW in this task instead of only raising
+     * ml_refresh_display_needed for the 50ms poll task (refresh_yuv_from_rgb_task). The
+     * deferred flag decouples the draw (menu_redraw_task) from the compositor poll: on HW
+     * this showed as main-menu nav not visibly updating until a submenu forced a direct
+     * composite, and the drawn selection lagging the internal one by one step (+1). Doing it
+     * inline makes every redraw atomic + immediate. Mirrors the flood path's own workaround
+     * ("looks glitchy if you only set ml_refresh_display_needed", menu_redraw_flood).
+     * refresh_yuv_from_rgb() clears ml_refresh_display_needed itself. */
+    extern void refresh_yuv_from_rgb(void);
+    if (DISPLAY_IS_ON)
+        refresh_yuv_from_rgb();
+    else
+        ml_refresh_display_needed = 1;
+#else
     ml_refresh_display_needed = 1;
+#endif
 }
 
 void menu_benchmark()

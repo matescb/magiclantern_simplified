@@ -25,25 +25,13 @@ extern void vignetting_correction_apply_regs();
 extern void raw_buffer_intercept_from_stateobj();
 extern int display_filter_lv_vsync(int old_state, int x, int input, int z, int t);
 
-#ifdef CONFIG_STATE_OBJECT_HOOKS
-
-/*
-static void stateobj_matrix_copy_for_patching(struct state_object * stateobj)
-{
-    int size = stateobj->max_inputs * stateobj->max_states * sizeof(struct state_transition);
-    struct state_transition * new_matrix = (struct state_transition *)malloc(size);
-    memcpy(new_matrix, stateobj->state_matrix, size);
-    stateobj->state_matrix = new_matrix;
-}
-
-static void stateobj_install_hook(struct state_object * stateobj, int input, int state, void* newfunc)
-{
-    if ((uint32_t)(stateobj->state_matrix) & 0xFF000000) // that's in ROM, make a copy to allow patching
-        stateobj_matrix_copy_for_patching(stateobj);
-    STATE_FUNC(stateobj,input,state) = newfunc;
-}
-*/
-
+/* [M50mk2 RAW-VIDEO R2, docs/31] vsync_counter + wait_lv_frames live OUTSIDE the
+ * CONFIG_STATE_OBJECT_HOOKS block so raw_lv_enable()/dump_img_task() can wait for
+ * LiveView frames WITHOUT enabling the EVF_STATE vsync hook (deferred to R3 to
+ * isolate the EvfCap risk). Hooks OFF: vsync_counter never increments and
+ * wait_lv_frames() falls back to its bounded time-based timeout (enough to let
+ * LiveView settle for a single-frame raw grab). Hooks ON (all other cams):
+ * vsync_func() increments the counter exactly as before -> unchanged behaviour. */
 static volatile int vsync_counter = 0;
 #ifndef CONFIG_7D_MASTER
 /* waits for N LiveView frames */
@@ -80,6 +68,25 @@ int wait_lv_frames(int num_frames)
     return 1;
 }
 #endif
+
+#ifdef CONFIG_STATE_OBJECT_HOOKS
+
+/*
+static void stateobj_matrix_copy_for_patching(struct state_object * stateobj)
+{
+    int size = stateobj->max_inputs * stateobj->max_states * sizeof(struct state_transition);
+    struct state_transition * new_matrix = (struct state_transition *)malloc(size);
+    memcpy(new_matrix, stateobj->state_matrix, size);
+    stateobj->state_matrix = new_matrix;
+}
+
+static void stateobj_install_hook(struct state_object * stateobj, int input, int state, void* newfunc)
+{
+    if ((uint32_t)(stateobj->state_matrix) & 0xFF000000) // that's in ROM, make a copy to allow patching
+        stateobj_matrix_copy_for_patching(stateobj);
+    STATE_FUNC(stateobj,input,state) = newfunc;
+}
+*/
 
 extern void digic_iso_step();
 

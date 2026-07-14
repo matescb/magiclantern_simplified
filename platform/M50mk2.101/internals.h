@@ -31,6 +31,10 @@
 /* has LV */
 #define CONFIG_LIVEVIEW
 
+/* [RAW-VIDEO R2, docs/31] M-series has no dedicated movie-mode dial position; ML
+ * enters movie/raw via menu. Matches M50 mk1 (platform/M50.110/internals.h). */
+#define CONFIG_NO_DEDICATED_MOVIE_MODE
+
 /* hooking EFV_STATE ends with EvfCap crashes, requires investigation */
 //#define CONFIG_STATE_OBJECT_HOOKS
 
