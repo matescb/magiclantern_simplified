@@ -383,6 +383,7 @@ ML_SRC_OBJS_00 = \
     cache_hacks.o \
     patch.o \
     picstyle.o \
+    serial_shell.o \
     cache.o
 ML_SRC_OBJS = $(addprefix $(BUILD_DIR)/, $(ML_SRC_OBJS_00))
 

@@ -194,8 +194,16 @@ static void trace_blink_forever(uint32_t pulses)
 
 /* Global direct-MMIO UART writer (HW debug), callable from init.c during bring-up.
  * Mirrors Canon uart_write_bytes (0xE007D814): TX=0xC0800000, status=0xC0800014, ready=bit1. */
+/* [DUPLEX-UART 2026-07-14] When the serial harness (serial_shell.c) is emitting a
+ * command reply, it raises this flag so the async ML loggers back off -- otherwise
+ * concurrent m50ii_uart_str() writes from ml_hb/ml_in shred the reply mid-line on
+ * the shared, unlocked TX register and the host can't parse it. Cleared between
+ * commands, so async logging flows normally the rest of the time. */
+volatile int g_ml_uart_quiet = 0;
+
 void m50ii_uart_str(const char *s)
 {
+    if (g_ml_uart_quiet) return;   /* serial harness owns the TX right now */
     volatile uint32_t *st = (volatile uint32_t *)0xC0800014;
     volatile uint32_t *tx = (volatile uint32_t *)0xC0800000;
     for (; *s; s++)

@@ -1687,6 +1687,14 @@ static void m50ii_heartbeat_task(void)   /* Phase-1 liveness: ticks => scheduler
 #ifndef M50II_GUI_PEEK
 #define M50II_GUI_PEEK 1
 #endif
+#ifndef M50II_SERIAL_SHELL
+#define M50II_SERIAL_SHELL 1   /* [DUPLEX-UART 2026-07-14] ON: start the serial_shell.c RX task.
+                                * Phase 0 = pure echo + heartbeat, to confirm the duplex link works
+                                * end-to-end and whether Canon's RX ISR steals bytes. [keeper: OFF] */
+#endif
+#if M50II_SERIAL_SHELL
+extern void m50ii_serial_shell_start(void);   /* serial_shell.c */
+#endif
 #if M50II_GUI_PEEK
 /* [iter15 PIVOT] Read-only GUI-event peek. Canon's gui_enqueue_message (0xE021DCB2) writes EVERY GUI/
  * button event into a ring at RAM 0x000BAE08 (=DAT_e021e034, 0x10-byte entries {type,p1,p2,p3}) and
@@ -1702,9 +1710,13 @@ static void m50ii_heartbeat_task(void)   /* Phase-1 liveness: ticks => scheduler
 extern void m50ii_handle_canon_gui_event(uint32_t type, uint32_t p1, uint32_t p2);  /* gui.c menu bridge */
 #endif
 #ifndef M50II_INPUT_TRACE
-#define M50II_INPUT_TRACE 0   /* [RAW-VIDEO: keycode captured = VIEW 0x12, OFF 2026-07-12] was ON
-                                 to capture the VIEW/PLAY button keycode for the
-                                 VIEW->toggle(BGMT_PRESS_SET) menu fix; done (gui.c wired), now OFF.
+#define M50II_INPUT_TRACE 0   /* [DUPLEX-UART 2026-07-14] OFF: the per-event [ML] BTN/DIAL flood
+                                 shredded serial-harness replies on the shared TX. Input task still
+                                 runs (menu nav); use the serial console to probe input instead.
+                               [prior] 1 = capture the [ML] BTN event stream while
+                                 navigating up/down in the MAIN menu vs a submenu -- to diagnose the
+                                 +1 selection/display desync + "dead until submenu" (composite fix had
+                                 no effect, so the cause is input delivery, not redraw). Turn OFF after.
                                [keeper: OFF] set 1 to log every button ([ML] BTN) + a periodic
                                * liveness/counter line ([ML] in.hb) over UART during HW bring-up. */
 #endif
@@ -1741,6 +1753,22 @@ static void m50ii_input_task(void)
                     m50ii_uart_str("[ML] BTN p1="); m50ii_uart_str(m50ii_hex(b, p1));
                     m50ii_uart_str(" p2=");         m50ii_uart_str(m50ii_hex(b, p2));
                     m50ii_uart_str("\n");
+                    /* [MENU-NAV 2026-07-13] The control dial reaches us as p1=0xB7 with a
+                     * rotation struct pointer in p2 -- it is the ONLY nav control that reaches
+                     * our ring in the main-menu Canon GUI mode (4-way pad 0x40/0x42 do not).
+                     * Dump the head of that struct so the CW/CCW direction field can be found
+                     * and 0xB7 wired to BGMT_WHEEL_UP/DOWN. Turn the dial one way N times, then
+                     * the other way N times; the word that flips value is the direction. */
+                    if (p1 == 0xB7 && p2 > 0x1000)
+                    {
+                        volatile uint32_t *s = (volatile uint32_t *)p2;
+                        m50ii_uart_str("[ML] DIAL s0="); m50ii_uart_str(m50ii_hex(b, s[0]));
+                        m50ii_uart_str(" s1=");          m50ii_uart_str(m50ii_hex(b, s[1]));
+                        m50ii_uart_str(" s2=");          m50ii_uart_str(m50ii_hex(b, s[2]));
+                        m50ii_uart_str(" s3=");          m50ii_uart_str(m50ii_hex(b, s[3]));
+                        m50ii_uart_str(" s4=");          m50ii_uart_str(m50ii_hex(b, s[4]));
+                        m50ii_uart_str("\n");
+                    }
                 }
                 else if (type == 2) n_t2++;
                 else if (type == 4) n_t4++;
@@ -1814,6 +1842,10 @@ void boot_post_init_task(void)
 #if M50II_GUI_PEEK
     task_create("ml_in", 0x1f, 0x1000, m50ii_input_task, 0);       /* [Phase 0-3] GUI ring peek -> ML menu input */
     m50ii_uart_str("[ML] post.0h: input task created\n");
+#endif
+#if M50II_SERIAL_SHELL
+    m50ii_serial_shell_start();                                    /* [DUPLEX-UART] RX echo task (Phase 0) */
+    m50ii_uart_str("[ML] post.0h: serial shell task created\n");
 #endif
 #if defined(CONFIG_PLATFORM_POST_INIT)
     platform_post_init();
