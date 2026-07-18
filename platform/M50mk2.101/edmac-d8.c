@@ -192,6 +192,13 @@ void edmac_memcpy_res_unlock()
     }
 }
 
+/* [M50 II, docs/32] Use a CPU rectangle copy instead of the D8 mem2mem EDMAC copy. HW-decoded proof:
+ * the mem2mem copy leaves the record slot STALE (the first captured MLV frame decoded to ML heap
+ * strings "Overlay\Cropmark", adj-row corr 0.26 = not an image), and its EDMAC-engine contention
+ * storms Canon DAF/EIS so LiveView wedges ~1s into recording. The single-DNG path proved a plain CPU
+ * copy of the raw buffer is correct AND conflict-free. Default 1. Runtime A/B: `wr &m50ii_edmac_cpu_copy 0`. */
+int m50ii_edmac_cpu_copy = 1;
+
 // reimplement this wonderful function with mem2mem_emdac_copy_d8
 void* edmac_copy_rectangle_cbr_start(void *dst, void *src,
                                      int src_width, int src_x, int src_y,
@@ -228,6 +235,21 @@ void* edmac_copy_rectangle_cbr_start(void *dst, void *src,
 
     uint32_t src_adjusted = ((uint32_t)src) + src_x + src_y * src_width;
     uint32_t dst_adjusted = ((uint32_t)dst) + dst_x + dst_y * dst_width;
+
+    if (m50ii_edmac_cpu_copy)
+    {
+        /* [M50 II] CPU rectangle copy: w bytes/row for h rows, honoring the src/dst strides.
+         * src is already UNCACHEABLE (mlv_lite passes UNCACHEABLE(raw_info.buffer)) so reads are
+         * fresh DMA data; the slot is written by the CPU (FIO_WriteFile sync_caches's it later). */
+        for (int row = 0; row < h; row++)
+        {
+            memcpy((void *)(dst_adjusted + (uint32_t)row * dst_width),
+                   (void *)(src_adjusted + (uint32_t)row * src_width),
+                   w);
+        }
+        cbr_w(NULL);   // clears edmac_active (no completion CBR on this path)
+        return dst;
+    }
 
     struct edmac_info src_region = {
         .off1b = src_width - w,
