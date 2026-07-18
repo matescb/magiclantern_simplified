@@ -142,15 +142,17 @@ extern int send_software_interrupt(uint32_t interrupt, uint32_t shifted_cpu_id);
 extern void *memcpy_dryos(void *dst, const void *src, uint32_t count);
 //extern void early_printf(char *fmt, ...);
 
+// This index is how far into our set of available 64k RAM pages we are.
+// When exhausted, we have no more RAM to back ROM edits.  File-scope (was a
+// function-local static) so mmu_reclaim_page_for_reuse() can reset it when a
+// remap page is released and its backing RAM returned to the pool.
+static uint32_t backing_page_index = 0;
+
 static int assign_64k_to_L2_table(struct patch *patch,
                                   struct mmu_L2_page_info *L2_page)
 {
     // SJE TODO can / should we use a semaphore here?  I'm not sure we can
     // given the fairly early context we want to call this.
-
-    // This index is how far into our set of available 64k RAM pages
-    // we are.  When exhausted, we have no more RAM to back ROM edits.
-    static uint32_t backing_page_index = 0;
 
     // An L2 section is split into 64kB "large pages", of which there can be 16
     // in use.  Determine which of these wants to be used.
@@ -720,6 +722,70 @@ static int apply_early_patches(void)
     return 0;
 }
 
+#if defined(CONFIG_M50mk2)
+// [M50II Phase 1 exclusivity] Reclaim the single default remap page so the GUI-input
+// exclusivity hook (funcs[0] @0xE021E460, L1 section 0xE0200000) can be applied.
+//
+// The M50 II memory budget allows only MMU_MAX_REMAP_PAGES=1; a 2nd page grows ML's BSS
+// by 64k (measured _bss_end 0x160000 > the 0x15fe00 DryOS-pool starvation threshold) and
+// panics Canon's boot. That single page/L2 is consumed by CONFIG_INIT1_HIJACK patching
+// PTR_INIT1_TASK (0xe00403c0, section 0xE0000000), which redirects cpu1's init1_task so
+// cpu1 adopts ML's MMU tables during bring-up. By the time apply_normal_patches() runs
+// (big.4a, after the cpu1-ready wait) the hijack has ALREADY served its purpose: cpu1 is
+// on ML tables and PTR_INIT1_TASK is never read again. So we release that page/L2 and
+// return its 64k backing RAM to the pool, letting funcs[0]'s section (0xE0200000) reuse it.
+//
+// The init1-hijack's split_l1_supersection() already broke the 16MB supersection
+// 0xE0000000-0xE0FFFFFF into 16 ROM sections; only section 0xE0000000 (L1 idx 0xE00) was
+// swapped to the L2. We restore 0xE00 to a plain ROM section by copying the flags of its
+// already-split ROM sibling 0xE0100000 (L1 idx 0xE01; identical flags, base 0xE0000000),
+// then clear the L2 bookkeeping and reset the backing-page allocator. The subsequent
+// apply_patch(funcs[0]) reuses the freed L2 and finalizes with change_mmu_tables (both
+// cores), so the L1 restore and the new mapping go live together (one TLBIALL).
+//
+// Returns 0 on success, negative if nothing was reclaimed (patch will then simply fail
+// to apply as before -- non-fatal, boot continues).
+static int mmu_reclaim_init1_page(void)
+{
+    volatile uint32_t *l1 = (volatile uint32_t *)global_mmu_conf.L1_table;
+    if (l1 == NULL)
+        return -1;
+
+    // Find the L2 currently mapping section 0xE0000000 (the init1-hijack page).
+    struct mmu_L2_page_info *init1_l2 = NULL;
+    for (uint32_t i = 0; i < global_mmu_conf.max_L2_tables; i++)
+    {
+        if (global_mmu_conf.L2_tables[i].in_use &&
+            global_mmu_conf.L2_tables[i].virt_page_mapped == 0xE0000000)
+        {
+            init1_l2 = &global_mmu_conf.L2_tables[i];
+            break;
+        }
+    }
+    if (init1_l2 == NULL)
+        return -2;   // nothing mapped there (e.g. hijack disabled) -> nothing to reclaim
+
+    // Restore L1[0xE00] to a plain ROM section using sibling 0xE0100000's flags.
+    // Section descriptor: bits[31:20]=base, bits[19:0]=type+flags; type 0b10 = section.
+    uint32_t sibling = l1[0xE01];               // ROM section for 0xE0100000
+    if ((sibling & 0x3) != 0x2)                 // sanity: sibling must be a section
+        return -3;
+    l1[0xE00] = (sibling & 0x000fffff) | 0xE0000000;
+
+    // Release the L2 bookkeeping and return its backing RAM to the pool.
+    init1_l2->in_use = 0;
+    init1_l2->virt_page_mapped = 0;
+    for (int i = 0; i < 16; i++)
+        init1_l2->phys_mem[i] = NULL;
+    backing_page_index = 0;
+
+    // Flush the L1 edit; apply_patch(funcs[0]) will do change_mmu_tables (both cores).
+    dcache_clean((uint32_t)global_mmu_conf.L1_table, MMU_L1_TABLE_SIZE);
+    dcache_clean_multicore((uint32_t)global_mmu_conf.L1_table, MMU_L1_TABLE_SIZE);
+    return 0;
+}
+#endif // CONFIG_M50mk2
+
 // This applies compile-time specified patches, happening later than
 // apply_early_patches().  This is done via a task, and happens late enough
 // that we can use malloc and RPC, allowing us to patch on both cores.
@@ -745,6 +811,23 @@ int apply_normal_patches(void)
 
     if (COUNT(normal_code_patches))
     {
+#if defined(CONFIG_M50mk2)
+        // Free the init1-hijack remap page so funcs[0]'s section can map (1-page budget).
+        int rc_reclaim = mmu_reclaim_init1_page();
+        qprintf("mmu_reclaim_init1_page: %d\n", rc_reclaim);
+        m50ii_uart_str(rc_reclaim == 0 ? "[ML] big.4a2: init1 remap page reclaimed\n"
+                                       : "[ML] big.4a2: init1 reclaim FAILED (funcs[0] may not map)\n");
+        // Apply CPU0-ONLY. patch_memory_rom() coordinates cpu1 via request_RPC ->
+        // wait_for_cpu1_busy_wait_update_mmu when is_cpu1_ready; that RPC/SGI-to-cpu1
+        // handshake FAULTS on M50 II HW (dfar in the 0xC09xxxxx GIC region) -- the same
+        // reason CONFIG_INIT1_HIJACK exists (see "request_RPC ... causes memory errors"
+        // in init_remap_mmu). funcs[0]/gui_main_task runs on cpu0, so cpu0 visibility is
+        // sufficient; cpu1 picks up the shared L1 table on its next TLB miss (it never
+        // executes funcs[0], and 0xE0040000 is only read pre-cpu1-start). Temporarily
+        // clear is_cpu1_ready so patch_memory_rom skips the crashing handshake.
+        uint32_t saved_cpu1_ready = is_cpu1_ready;
+        is_cpu1_ready = 0;
+#endif
         struct patch code_patches[COUNT(normal_code_patches)] = {};
         uint8_t code_hooks[8 * COUNT(normal_code_patches)] = {};
 
@@ -753,9 +836,20 @@ int apply_normal_patches(void)
             if (convert_f_patch_to_patch(&normal_code_patches[i],
                                          &code_patches[i],
                                          &code_hooks[8 * i]))
+            {
+#if defined(CONFIG_M50mk2)
+                is_cpu1_ready = saved_cpu1_ready;
+#endif
                 return -3;
+            }
         }
-        if (apply_patches(code_patches, COUNT(normal_code_patches)))
+        int cp_rc = apply_patches(code_patches, COUNT(normal_code_patches));
+#if defined(CONFIG_M50mk2)
+        is_cpu1_ready = saved_cpu1_ready;   // restore before any return/continue
+        m50ii_uart_str(cp_rc == 0 ? "[ML] big.4b1: funcs[0] exclusivity patch applied (cpu0-only)\n"
+                                  : "[ML] big.4b1: funcs[0] patch FAILED\n");
+#endif
+        if (cp_rc)
             return -3;
     }
     return 0;

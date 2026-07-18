@@ -216,8 +216,17 @@ static void m50ii_gui_hex(const char *label, uint32_t a, uint32_t b)
 #define M50II_KEY_VIEW   0x12   /* HW 2026-07-12: VIEW/playback press=0x12, release=0x13 (p2=0).
                                  * -> BGMT_PRESS_SET (toggle values / enable modules); complements
                                  * SET/Q(0x0A)->BGMT_Q(submenu). Captured via [ML] BTN trace outside ML. */
-#define M50II_KEY_DIAL   0xB7   /* control-dial rotation; direction in the struct *p2 (Phase 3 probe).
-                                 * NOTE 0xB7 ALSO fires as background -- real up/down decode is deferred. */
+#define M50II_KEY_DIAL   0xB7   /* control-dial rotation NOTCH (generic; also fires as background).
+                                 * The rotation DIRECTION arrives as its own clean type-0 event just
+                                 * before/with each 0xB7: 0x08 one way, 0x09 the other (HW keycode
+                                 * capture 2026-07-17: dial turned 4x each side -> 0x08 x4 then 0x09 x4).
+                                 * We use 0x08/0x09 for nav and ignore the unreliable 0xB7 struct. */
+#define M50II_KEY_DIAL_UP    0x08  /* control-dial one way  -> menu up   (swap with DOWN if inverted) */
+#define M50II_KEY_DIAL_DOWN  0x09  /* control-dial other way -> menu down */
+/* HW NOTE (2026-07-17 keycode capture, ML menu open): the physical 4-way pad UP(0x40)/DOWN(0x42)/
+ * LEFT(0x3E) do NOT reach the GUI ring at all in this Canon GUI mode -- Canon consumes them -- so they
+ * can't drive the ML menu from the bridge. Only RIGHT(0x3C), MENU(0x0C), SET/Q(0x0A), FN(0x22) and the
+ * DIAL reach us. => the control DIAL is the M50 II's menu up/down. */
 /* 0x9F (old PLAY) intentionally DROPPED: it is background noise in this mode and would spam the menu. */
 
 #define M50II_ST_PRESS   0
@@ -234,6 +243,11 @@ static void m50ii_gui_hex(const char *label, uint32_t a, uint32_t b)
  * stub on this body (stubs.S:221), so they are no-ops here. Navigation is gated to gui_menu_shown():
  * while the ML menu is closed we touch nothing but the FN toggle, preserving the clean-boot,
  * Canon-undisturbed property that made the iter15 read-only peek work. */
+/* [M50II Phase 2] Physical REC-button keycode (movie mode) -> ML raw record. NOT YET CAPTURED on
+ * HW; runtime-settable (non-static) so a candidate can be tested live via `wr &m50ii_rec_keycode
+ * <code>` without a rebuild. 0xFF = disabled sentinel (matches no real button). */
+int m50ii_rec_keycode = 0xFF;
+
 void m50ii_handle_canon_gui_event(uint32_t type, uint32_t p1, uint32_t p2)
 {
 #if M50II_MENU_INPUT
@@ -258,7 +272,31 @@ void m50ii_handle_canon_gui_event(uint32_t type, uint32_t p1, uint32_t p2)
                 ? "[ML] menu-input: FN -> close ML menu\n"
                 : "[ML] menu-input: FN -> open ML menu\n");
 #endif
-            gui_open_menu();           /* give_semaphore(gui_sem) -> menu_task toggles */
+            /* [M50II #3 fix, HW-validated 2026-07-17] gui_open_menu() is give_semaphore(gui_sem),
+             * which OPENS but does NOT reliably toggle-closed on HW (menu_task stays in its loop);
+             * that's why a 2nd FN press didn't close the menu. Toggle EXPLICITLY: close via
+             * gui_stop_menu() when shown, else open. (QEMU's timing masked this; real HW needs it.) */
+            extern void gui_stop_menu(void);
+            if (gui_menu_shown())
+                gui_stop_menu();
+            else
+                gui_open_menu();
+        }
+        return;
+    }
+
+    /* [M50II Phase 2] Physical REC (movie) button -> ML raw recording, INDEPENDENT of the ML menu.
+     * mlv_lite's raw_rec_keypress_cbr toggles raw on MODULE_KEY_REC -> raw_start_stop(); route the
+     * REC keycode into the module keypress chain. Acts on the press edge, menu open or closed. */
+    if (p1 == (uint32_t)m50ii_rec_keycode)
+    {
+        if (p2 == M50II_ST_PRESS)
+        {
+            extern int module_send_keypress(int module_key);
+            module_send_keypress(27 /* MODULE_KEY_REC (module.h) */);
+#if M50II_MENU_INPUT_TRACE
+            m50ii_uart_str("[ML] menu-input: REC -> module_send_keypress(MODULE_KEY_REC)\n");
+#endif
         }
         return;
     }
@@ -305,8 +343,11 @@ void m50ii_handle_canon_gui_event(uint32_t type, uint32_t p1, uint32_t p2)
         case M50II_KEY_VIEW:  bgmt = BGMT_PRESS_SET;   break;
         case M50II_KEY_LEFT:  bgmt = BGMT_PRESS_LEFT;  break;
         case M50II_KEY_RIGHT: bgmt = BGMT_PRESS_RIGHT; break;
-        case M50II_KEY_UP:    bgmt = BGMT_PRESS_UP;    break;
-        case M50II_KEY_DOWN:  bgmt = BGMT_PRESS_DOWN;  break;
+        case M50II_KEY_UP:    bgmt = BGMT_PRESS_UP;    break;   /* pad UP -- never arrives on M50 II */
+        case M50II_KEY_DOWN:  bgmt = BGMT_PRESS_DOWN;  break;   /* pad DOWN -- never arrives on M50 II */
+        /* Control dial = the working menu up/down on the M50 II (pad up/down is eaten by Canon). */
+        case M50II_KEY_DIAL_UP:   bgmt = BGMT_PRESS_UP;    break;
+        case M50II_KEY_DIAL_DOWN: bgmt = BGMT_PRESS_DOWN;  break;
         default: return;
     }
 

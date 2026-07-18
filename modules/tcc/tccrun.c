@@ -41,6 +41,12 @@ static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level);
 static void rt_error(ucontext_t *uc, const char *fmt, ...);
 static int tcc_relocate_ex(TCCState *s1, void *ptr);
 
+/* [M50mk2 mlv_lite link-fail debug] capture per-section {name4, sh_flags, data_offset}
+ * during the size-calc pass (ptr==NULL) so the ballooning section can be read back over
+ * the serial harness (rd/md g_tccdbg). Trailer marker 0xEEEEEEEE then the final size. */
+volatile unsigned int g_tccdbg[192];
+volatile unsigned int g_tccdbg_n = 0;
+
 #ifdef _WIN64
 static void win64_add_function_table(TCCState *s1);
 #endif
@@ -150,8 +156,14 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr)
     }
 
     offset = 0, mem = (addr_t)ptr;
+    if (NULL == ptr) g_tccdbg_n = 0;   /* fresh capture each size-calc pass */
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
+        if (NULL == ptr && g_tccdbg_n + 3 <= 192) {
+            g_tccdbg[g_tccdbg_n++] = *(volatile unsigned int *)s->name;  /* first 4 chars */
+            g_tccdbg[g_tccdbg_n++] = (unsigned int)s->sh_flags;
+            g_tccdbg[g_tccdbg_n++] = (unsigned int)s->data_offset;
+        }
         if (0 == (s->sh_flags & SHF_ALLOC))
             continue;
         length = s->data_offset;
@@ -159,6 +171,10 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr)
         offset = (offset + length + 15) & ~15;
     }
     offset += 16;
+    if (NULL == ptr && g_tccdbg_n + 2 <= 192) {
+        g_tccdbg[g_tccdbg_n++] = 0xEEEEEEEE;          /* trailer marker */
+        g_tccdbg[g_tccdbg_n++] = (unsigned int)offset; /* final size passed to tcc_malloc */
+    }
 
     /* relocate symbols */
     relocate_syms(s1, 1);

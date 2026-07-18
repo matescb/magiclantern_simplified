@@ -1710,7 +1710,10 @@ extern void m50ii_serial_shell_start(void);   /* serial_shell.c */
 extern void m50ii_handle_canon_gui_event(uint32_t type, uint32_t p1, uint32_t p2);  /* gui.c menu bridge */
 #endif
 #ifndef M50II_INPUT_TRACE
-#define M50II_INPUT_TRACE 0   /* [DUPLEX-UART 2026-07-14] OFF: the per-event [ML] BTN/DIAL flood
+#define M50II_INPUT_TRACE 0   /* OFF (clean build). Set 1 to log each non-bg ring event with the ML menu
+                                 state ([TOP]/[SUB]/[closed]) -- used to prove the menu-input keycodes are
+                                 Canon-shooting-mode-dependent (Auto vs Video/M), see docs/33.
+                               [DUPLEX-UART 2026-07-14] OFF: the per-event [ML] BTN/DIAL flood
                                  shredded serial-harness replies on the shared TX. Input task still
                                  runs (menu nav); use the serial console to probe input instead.
                                [prior] 1 = capture the [ML] BTN event stream while
@@ -1741,38 +1744,43 @@ static void m50ii_input_task(void)
             volatile uint32_t *e = (volatile uint32_t *)(RING + last * 0x10);
             uint32_t type = e[0], p1 = e[1], p2 = e[2];
 
-            /* Skip the idle keep-alive (type==0, p1==0xA7, ~every 3s): carries no input. */
+            /* Skip the idle keep-alive (type==0, p1==0xA7): carries no input. */
             int is_idle = (type == 0 && p1 == 0xA7);
 #if M50II_INPUT_TRACE
-            if (!is_idle)
+            /* Also skip the constant background chatter so the trace shows ONLY real
+             * input: type4 poll events + type2 p1=0x44/0xEB (seen ~25/s on HW). */
+            int is_bg = is_idle || (type == 4) || (type == 2 && (p1 == 0x44 || p1 == 0xEB));
+            if (!is_bg)
             {
                 total++;
-                if (type == 0)
-                {
-                    n_t0++;
-                    m50ii_uart_str("[ML] BTN p1="); m50ii_uart_str(m50ii_hex(b, p1));
-                    m50ii_uart_str(" p2=");         m50ii_uart_str(m50ii_hex(b, p2));
-                    m50ii_uart_str("\n");
-                    /* [MENU-NAV 2026-07-13] The control dial reaches us as p1=0xB7 with a
-                     * rotation struct pointer in p2 -- it is the ONLY nav control that reaches
-                     * our ring in the main-menu Canon GUI mode (4-way pad 0x40/0x42 do not).
-                     * Dump the head of that struct so the CW/CCW direction field can be found
-                     * and 0xB7 wired to BGMT_WHEEL_UP/DOWN. Turn the dial one way N times, then
-                     * the other way N times; the word that flips value is the direction. */
-                    if (p1 == 0xB7 && p2 > 0x1000)
-                    {
-                        volatile uint32_t *s = (volatile uint32_t *)p2;
-                        m50ii_uart_str("[ML] DIAL s0="); m50ii_uart_str(m50ii_hex(b, s[0]));
-                        m50ii_uart_str(" s1=");          m50ii_uart_str(m50ii_hex(b, s[1]));
-                        m50ii_uart_str(" s2=");          m50ii_uart_str(m50ii_hex(b, s[2]));
-                        m50ii_uart_str(" s3=");          m50ii_uart_str(m50ii_hex(b, s[3]));
-                        m50ii_uart_str(" s4=");          m50ii_uart_str(m50ii_hex(b, s[4]));
-                        m50ii_uart_str("\n");
-                    }
-                }
+                if      (type == 0) n_t0++;
                 else if (type == 2) n_t2++;
                 else if (type == 4) n_t4++;
                 else                n_ot++;
+                /* Log EVERY non-background event with its type -- pad/FN/nav/dial may
+                 * arrive as any type, so don't restrict to type==0. */
+                m50ii_uart_str("[ML] EVT t="); m50ii_uart_str(m50ii_hex(b, type));
+                m50ii_uart_str(" p1=");        m50ii_uart_str(m50ii_hex(b, p1));
+                m50ii_uart_str(" p2=");        m50ii_uart_str(m50ii_hex(b, p2));
+                /* tag the ML menu state so top-level vs submenu is unambiguous in the log */
+                {
+                    extern int gui_menu_shown(void);
+                    extern int is_submenu_or_edit_mode_active(void);
+                    m50ii_uart_str(!gui_menu_shown() ? " [closed]\n"
+                                   : is_submenu_or_edit_mode_active() ? " [SUB]\n" : " [TOP]\n");
+                }
+                /* [MENU-NAV] the control dial arrives as p1=0xB7 with a rotation struct
+                 * pointer in p2; dump its head so CW/CCW can be wired to menu up/down. */
+                if (p1 == 0xB7 && p2 > 0x1000)
+                {
+                    volatile uint32_t *s = (volatile uint32_t *)p2;
+                    m50ii_uart_str("[ML] DIAL s0="); m50ii_uart_str(m50ii_hex(b, s[0]));
+                    m50ii_uart_str(" s1=");          m50ii_uart_str(m50ii_hex(b, s[1]));
+                    m50ii_uart_str(" s2=");          m50ii_uart_str(m50ii_hex(b, s[2]));
+                    m50ii_uart_str(" s3=");          m50ii_uart_str(m50ii_hex(b, s[3]));
+                    m50ii_uart_str(" s4=");          m50ii_uart_str(m50ii_hex(b, s[4]));
+                    m50ii_uart_str("\n");
+                }
             }
 #endif
 #if defined(CONFIG_M50mk2)

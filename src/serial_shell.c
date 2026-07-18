@@ -368,12 +368,35 @@ static void cmd_watch(int argc, char **argv)
 
 static void cmd_key(int argc, char **argv)
 {
-    if (argc < 2) { sh_end_err("usage: key <code>"); return; }
+    if (argc < 2) { sh_end_err("usage: key <code> [state]"); return; }
     int ok = 0;
     uint32_t code = sh_parse_num(argv[1], &ok);
     if (!ok) { sh_end_err("bad code"); return; }
-    m50ii_handle_canon_gui_event(0, code, 0);
-    sh_puts("injected key "); sh_puthex(code); sh_puts("\n");
+    uint32_t state = 0;
+    if (argc >= 3) { int k; state = sh_parse_num(argv[2], &k); if (!k) state = 0; }
+    /* ML-BRIDGE-ONLY injection: calls the ML bridge directly, bypassing Canon's queue.
+     * Use this to test ML's menu/nav logic IN ISOLATION (the #2/#3 isolation test). */
+    m50ii_handle_canon_gui_event(0, code, state);
+    sh_puts("injected key "); sh_puthex(code); sh_puts(" state "); sh_puthex(state); sh_puts("\n");
+    sh_end_ok();
+}
+
+/* [M50II] inject a FULL synthetic button press via Canon's gui_enqueue_message @0xE021DCB2:
+ * it writes the event to the ring AND posts to Canon's queue, so BOTH Canon's gui_main_task
+ * and ML's ring-peek process it -- a realistic hardware press. Use `key` for ML-bridge-only.
+ * `btn <keycode> [state]`  (state 0=press, 1=repeat, 2=release). */
+static void cmd_btn(int argc, char **argv)
+{
+    if (argc < 2) { sh_end_err("usage: btn <keycode> [state]"); return; }
+    int ok = 0;
+    uint32_t code = sh_parse_num(argv[1], &ok);
+    if (!ok) { sh_end_err("bad code"); return; }
+    uint32_t state = 0;
+    if (argc >= 3) { int k; state = sh_parse_num(argv[2], &k); if (!k) state = 0; }
+    void (*gui_enqueue)(uint32_t, uint32_t, uint32_t, uint32_t) =
+        (void (*)(uint32_t, uint32_t, uint32_t, uint32_t))(0xE021DCB2u | 1u);  /* thumb */
+    gui_enqueue(0, code, state, 0);
+    sh_puts("btn enqueued code "); sh_puthex(code); sh_puts(" state "); sh_puthex(state); sh_puts("\n");
     sh_end_ok();
 }
 
@@ -439,6 +462,62 @@ static void cmd_exec(int argc, char **argv)
     sh_end_ok();
 }
 
+/* --- state-object transition spy (mlv_lite EVF_STATE hunt) ---
+ * Canon state_object: +0x0c = StateTransition(self,x,input,z,t), +0x1c = current_state.
+ * We replace a target object's transition ptr with sh_state_spy, which records the
+ * transition (count + last input/old/new) into globals then calls the original.
+ * NO UART I/O in the spy (it runs in Canon's transition/interrupt context) -- poll the
+ * record with "statespy" (no arg). Lets us find which state object fires once per LV
+ * frame (count climbs ~30/s) and its exact (input,old_state) for the D8 vsync branch. */
+typedef int (*sh_state_fn)(void *self, int x, int input, int z, int t);
+static void      *g_spy_obj  = 0;      /* hooked state_object (0 = none) */
+static sh_state_fn g_spy_orig = 0;     /* its original transition fn */
+static volatile uint32_t g_spy_count = 0;
+static volatile uint32_t g_spy_rec[3] = {0, 0, 0};   /* last: input, old_state, new_state */
+
+static int sh_state_spy(void *self, int x, int input, int z, int t)
+{
+    uint32_t old = *(volatile uint32_t *)((char *)self + 0x1c);
+    int r = g_spy_orig(self, x, input, z, t);
+    g_spy_rec[0] = (uint32_t)input;
+    g_spy_rec[1] = old;
+    g_spy_rec[2] = *(volatile uint32_t *)((char *)self + 0x1c);
+    g_spy_count++;
+    return r;
+}
+
+static void cmd_statespy(int argc, char **argv)
+{
+    if (argc < 2)   /* report */
+    {
+        sh_puts("spy obj=");  sh_puthex((uint32_t)(uintptr_t)g_spy_obj);
+        sh_puts(" count=");   sh_puthex(g_spy_count);
+        sh_puts(" last in="); sh_puthex(g_spy_rec[0]);
+        sh_puts(" ");         sh_puthex(g_spy_rec[1]); sh_puts("->"); sh_puthex(g_spy_rec[2]);
+        sh_puts("\n"); sh_end_ok(); return;
+    }
+    if (sh_streq(argv[1], "off"))
+    {
+        if (g_spy_obj && g_spy_orig)
+            *(volatile void **)((char *)g_spy_obj + 0x0c) = (void *)g_spy_orig;
+        g_spy_obj = 0; g_spy_orig = 0;
+        sh_puts("spy off\n"); sh_end_ok(); return;
+    }
+    int ok = 0;
+    uint32_t obj = sh_parse_num(argv[1], &ok);
+    if (!ok || obj < 0x1000 || IS_ROM(obj)) { sh_end_err("bad objptr"); return; }
+    if (g_spy_obj) { sh_end_err("spy busy; 'statespy off' first"); return; }
+    volatile void **tptr = (volatile void **)((char *)(uintptr_t)obj + 0x0c);   /* StateTransition */
+    g_spy_orig  = (sh_state_fn)(*tptr);
+    g_spy_obj   = (void *)(uintptr_t)obj;
+    g_spy_count = 0;
+    g_spy_rec[0] = g_spy_rec[1] = g_spy_rec[2] = 0;
+    *tptr = (void *)((uintptr_t)&sh_state_spy);   /* &fn already has the thumb bit */
+    sh_puts("spy on obj="); sh_puthex(obj);
+    sh_puts(" orig=");      sh_puthex((uint32_t)(uintptr_t)g_spy_orig);
+    sh_puts("\n"); sh_end_ok();
+}
+
 static void sh_dispatch(char *line)
 {
     char *argv[SH_MAX_ARGS];
@@ -471,10 +550,12 @@ static void sh_dispatch(char *line)
     else if (sh_streq(cmd, "edmac"))                      cmd_edmac();
     else if (sh_streq(cmd, "watch"))                      cmd_watch(argc, av);
     else if (sh_streq(cmd, "key"))                        cmd_key(argc, av);
+    else if (sh_streq(cmd, "btn"))                        cmd_btn(argc, av);
     else if (sh_streq(cmd, "wr"))                         cmd_wr(argc, av);
     else if (sh_streq(cmd, "call"))                       cmd_call(argc, av);
     else if (sh_streq(cmd, "load"))                       cmd_load(argc, av);
     else if (sh_streq(cmd, "exec"))                       cmd_exec(argc, av);
+    else if (sh_streq(cmd, "statespy"))                   cmd_statespy(argc, av);
     else                                                  sh_end_err("unknown cmd");
 
     g_ml_uart_quiet = 0;   /* release the TX; async logging resumes */

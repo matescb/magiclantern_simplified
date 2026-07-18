@@ -201,49 +201,81 @@ static void dump_img_task(void* priv, int unused)
     get_numbered_file_name(pattern, 999, filename, sizeof(filename));
     
 #if defined(CONFIG_M50mk2)
-    /* [RAW-VIDEO R2 diag v2, docs/31] HW showed params=0 buf=0 => raw_lv_edmac->ram_addr
-     * (base RAW_LV_EDMAC_CHANNEL_ADDR 0xd0420200, ram_addr ~+0xA4) read 0: Canon isn't
-     * publishing a raw buffer there in the tested mode. Localize: show mode (movie vs photo
-     * matters -- raw LV wants movie), dump the register block, and RETRY after a few LV
-     * frames (Canon may publish the addr a few frames after lv_save_raw). */
-    NotifyBox(3000, "R2: lv=%d movie=%d dispsize=%d", lv, is_movie_mode(), lv_dispsize);
-    msleep(2500);
+    /* [RAW-VIDEO R2, docs/31] Capture one raw frame to DNG. Needs MOVIE-mode LiveView
+     * standby -- photo mode doesn't publish a raw buffer (HW-confirmed). raw_lv_request()
+     * arms the D8 raw stream (lv_set_mm + lv_save_raw); the buffer is a single fixed region
+     * Canon overwrites in place (HW-confirmed via the serial harness: 0x6BC61CC8,
+     * 2096x1164 @14bit, black 2047 / white 16200). */
+    if (lv && !is_movie_mode())
+    {
+        NotifyBox(4000, "R2 raw: switch to MOVIE mode (raw LV needs movie)");
+        msleep(3000);
+    }
     if (lv) raw_lv_request();
-    volatile uint32_t *rr = (volatile uint32_t *)RAW_LV_EDMAC_CHANNEL_ADDR;
-    NotifyBox(6000, "R2 reg 0420200:\n+00=%x +80=%x\n+A0=%x +A4=%x",
-              (unsigned)rr[0], (unsigned)rr[0x20], (unsigned)rr[0x28], (unsigned)rr[0x29]);
-    msleep(5000);
     int m50ii_rup = raw_update_params();
-    if (!m50ii_rup) { wait_lv_frames(5); m50ii_rup = raw_update_params(); }  /* retry after frames */
-    NotifyBox(6000, "R2 raw: params=%d buf=%x\n%dx%d fs=%d", m50ii_rup,
-              (unsigned)raw_info.buffer, raw_info.width, raw_info.height, raw_info.frame_size);
-    msleep(5000);
+    if (!m50ii_rup) { wait_lv_frames(5); m50ii_rup = raw_update_params(); }  /* let LV settle */
     if (m50ii_rup)
 #else
     if (lv) raw_lv_request();
     if (raw_update_params())
 #endif
     {
-        /* first frames right after enabling the raw buffer might be corrupted, figure out why */
-        /* todo: fix it in the raw backend */
+        /* first frames right after enabling the raw buffer might be corrupted */
         wait_lv_frames(3);
         raw_set_dirty();
-        raw_update_params();
 
-        /* make a copy of the raw buffer, because it's being updated while we are saving it */
-        void* buf = malloc(raw_info.frame_size);
-        if (buf)
+        /* Re-run params to pick up the settled frame, but a transient failure must NOT
+         * zero raw_info -> malloc(0)/memcpy(0) -> 0-byte DNG (M50 II, docs/31). Snapshot
+         * the last-good params and only replace them if the re-run succeeds; the buffer
+         * pointer is stable across frames, so the snapshot stays valid. */
+        struct raw_info ri = raw_info;
+        if (raw_update_params()) ri = raw_info;
+
+        if (ri.buffer && ri.frame_size > 0)
         {
-            memcpy(buf, raw_info.buffer, raw_info.frame_size);
-            struct raw_info local_raw_info = raw_info;
-            local_raw_info.buffer = buf;
-            save_dng(filename, &local_raw_info);
-            free(buf);
+            /* make a copy of the raw buffer, because it's being updated while we save it */
+            void* buf = malloc(ri.frame_size);
+            if (buf)
+            {
 #if defined(CONFIG_M50mk2)
-            NotifyBox(4000, "R2 raw: save_dng done");
-            msleep(2500);
+                /* read the DMA-filled raw buffer via its uncacheable mirror -- the cacheable
+                 * view can hold a stale frame (raw_update_params just cached it for black/white
+                 * autodetect). The write side is handled by FIO_WriteFile (docs/32). */
+                memcpy(buf, UNCACHEABLE(ri.buffer), ri.frame_size);
+#else
+                memcpy(buf, ri.buffer, ri.frame_size);
+#endif
+                struct raw_info local_raw_info = ri;
+                local_raw_info.buffer = buf;
+#if defined(CONFIG_M50mk2)
+                /* [M50 II, docs/31] Write the plain packed raw buffer FIRST (save_dng may
+                 * byte-swap it in place). A single large FIO_WriteFile is proven on this body
+                 * (the .422 dumps land); unpack on the host with tools/mlserial/raw_dng.py.
+                 * save_dng's header/thumbnail alloc path is still flaky here, so the .RAW is
+                 * the reliable image route. */
+                {
+                    char rawname[0x80];
+                    char rawpat[0x80];
+                    snprintf(rawpat, sizeof(rawpat), "%s/%s/%s/RAW-%%03d.RAW",
+                             CAMERA_MODEL, video_mode, display_device);
+                    get_numbered_file_name(rawpat, 999, rawname, sizeof(rawname));
+                    FILE* rf = FIO_CreateFile(rawname);
+                    int w = -1;
+                    if (rf) { w = FIO_WriteFile(rf, UNCACHEABLE(buf), ri.frame_size); FIO_CloseFile(rf); }
+                    NotifyBox(5000, "R2 RAW: %dx%d wrote %d/%d", ri.width, ri.height, w, (int)ri.frame_size);
+                    msleep(3000);
+                }
+#endif
+                save_dng(filename, &local_raw_info);
+                free(buf);
+            }
+#if defined(CONFIG_M50mk2)
+            else { NotifyBox(4000, "R2 raw: malloc(%d) failed", ri.frame_size); msleep(2500); }
 #endif
         }
+#if defined(CONFIG_M50mk2)
+        else { NotifyBox(4000, "R2 raw: raw_info empty (buf=%x fs=%d)", (unsigned)ri.buffer, ri.frame_size); msleep(2500); }
+#endif
     }
     if (lv) raw_lv_release();
     

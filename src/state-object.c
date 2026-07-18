@@ -219,6 +219,10 @@ static int FAST stateobj_lv_spy(struct state_object * self, int x, int input, in
     if (self == LV_STATE && input==4 && old_state==4) // AJ_ResetPSave_n_WB_n_LVREC_MVR_EV_EXPOSURESTARTED => perfect sync for digic on 5D2 :)
     #elif defined(CONFIG_550D)
     if (self == LV_STATE && input==5 && old_state == 5) // SYNC_GetEngineResource => perfect sync for digic :)
+    #elif defined(CONFIG_M50mk2)
+    /* M50 II EvfDevState(*(0x10108)) per-frame transition, found live via the serial-harness
+     * statespy: input==6 old_state==3 (a self-transition 3->3, ~fires per LV frame). */
+    if (self == EVF_STATE && input == 6 && old_state == 3)
     #elif defined(CONFIG_EVF_STATE_SYNC)
     if (self == EVF_STATE && input == 5 && old_state == 5) // evfReadOutDoneInterrupt => perfect sync for digic :)
     #else
@@ -272,6 +276,7 @@ static int stateobj_em_spy(struct state_object * self, int x, int input, int z, 
 
 static int stateobj_start_spy(struct state_object * stateobj, void* spy)
 {
+    if (!stateobj) return 1;   /* object not created yet -> don't deref NULL */
     ASSERT(streq(stateobj->type, "StateObject"));
 
     if (!StateTransition)
@@ -300,6 +305,10 @@ static void state_init(void* unused)
         stateobj_start_spy(LV_STATE, stateobj_lv_spy);
     #endif
     #ifdef EVF_STATE
+        /* EVF_STATE (the pointer global) may be NULL until Canon's EVF/LV subsystem creates
+         * the object. Wait (bounded) before hooking so we don't deref NULL and crash -- and
+         * so QEMU (which never creates it) skips instead of crashing/hanging boot. */
+        for (int i = 0; i < 200 && !EVF_STATE; i++) msleep(50);   /* up to ~10s */
         stateobj_start_spy(EVF_STATE, stateobj_lv_spy);
     #endif
     

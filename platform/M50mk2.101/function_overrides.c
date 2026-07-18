@@ -218,3 +218,27 @@ void _free_dma_memory(void *ptr)
 {
     if (ptr) _FreeMemory(CACHEABLE(ptr));
 }
+
+/* [M50mk2 mlv_lite/module compat shims, docs/31 R3]
+ * mlv_lite (+ mlv_rec/mlv.c) reference ML symbols that are gated OUT of this port, so the
+ * on-camera module linker (tcc relocate_syms) fails with "undefined symbol" and refuses to
+ * load mlv_lite. Provide safe stubs so it links; each degrades gracefully:
+ *   - srm_malloc_suite/srm_free_suite : SRM disabled here (CONFIG_MEMORY_SRM_NOT_WORKING);
+ *     alloc returns NULL -> mlv_lite falls back to shoot_malloc for its frame buffers.
+ *   - picstyle_get_current_*          : FEATURE_PICSTYLE disabled (0x0205 props absent on
+ *     this body); return neutral defaults (only used to tag MLV metadata).
+ *   - ErrCardForLVApp_handler         : Canon LV-error dialog handler, no stub on this body.
+ *     Only ever used as &ErrCardForLVApp_handler in dialog-handler equality checks; a unique
+ *     dummy address never matches a real handler, so that special-case is simply never taken.
+ * None of these are defined elsewhere in this build (all gated off), so no duplicate symbols. */
+struct memSuite;
+struct memSuite *srm_malloc_suite(int num_requested_buffers) { (void)num_requested_buffers; return (void *)0; }
+void srm_free_suite(struct memSuite *suite) { (void)suite; }
+
+const char *picstyle_get_current_name(void)   { return "Standard"; }
+int picstyle_get_current_sharpness(void)       { return 0; }
+int picstyle_get_current_contrast(void)        { return 0; }
+int picstyle_get_current_saturation(void)      { return 0; }
+int picstyle_get_current_color_tone(void)      { return 0; }
+
+thunk ErrCardForLVApp_handler = 0;   /* thunk == void(*)(void); address only ever compared */

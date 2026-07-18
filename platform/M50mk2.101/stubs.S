@@ -366,16 +366,44 @@ THUMB_FN(0xE05B0D40,  WaitForAllEventFlag)                  /* +0x80 from WaitFo
 /** DIGIC 8 EDMAC mem2mem engine (RAW-VIDEO R1, docs/30) — resolved+verified on gang100 1.0.1.
  *  Called by platform/edmac-d8.c. All Thumb. Addresses from the 61-agent RE workflow + closer. **/
 THUMB_FN(0xe05b848e,  edmac_set_address)                    /* leaf: writes addr into chan desc +0xa0 (twin of set_size) */
-THUMB_FN(0xe05b8862,  edmac_set_size)                       /* leaf: writes transfer size into chan desc */
+/* [M50mk2 RAW-VIDEO set_size fix, docs/32] was 0xe05b8862 = the SCALAR byte-count SetEDmac wrapper
+ * (2nd arg = byte count; align-check assert 0x45e, block-count assert 0x463). edmac-d8.c passes a
+ * struct edmac_info* which that wrapper treated as a byte count -> fabricated nonzero geometry ->
+ * inner writer FUN_e05b849a asserts Engine::Edmac.c:0x40B (x2). 0xe05b849a IS the real (channel,
+ * struct edmac_info*) geometry writer = set_address(0xe05b848e) + 0xc; xn=yn=0 in our info makes the
+ * capability gate false -> no assert. +0xc twin matches SX740 (f192->f19e) / M50mk1 (a9ae->a9ba). */
+THUMB_FN(0xe05b849a,  edmac_set_size)                       /* leaf: 2-D geometry writer (channel, struct edmac_info*) */
 THUMB_FN(0xe05b88fc,  edmac_set_transfer_mode)              /* set chan transfer mode */
 THUMB_FN(0xe05b9690,  StartEDmac_maybe)                     /* start an EDMAC channel */
 THUMB_FN(0xe05b95e4,  ConnectReadEDmac_maybe)               /* connect a read chan (single arg on D8) */
-THUMB_FN(0xe05b96b8,  edmac_reset_channel)                  /* reset an EDMAC channel */
-THUMB_FN(0xe05b5720,  edmac_reset_boomer_vdkick)            /* reset Boomer VdKick for a channel */
-THUMB_FN(0xe0683ca0,  edmac_select_boomer)                  /* select Boomer (selector 0x373f0126) */
+/* [M50mk2 RAW-VIDEO channel-prepare fix, docs/32] edmac-d8.c's mem2mem calls edmac_reset_channel(RD)+(WR)
+ * as the first two calls -- in Canon's real mem2mem this slot is the per-channel PREPARE (kitor's EOS R
+ * FUN_e0535998), which clears the per-channel status array and pokes the channel MMIO into its ready state
+ * (field_0x1c 0x80000000->0, field_0x18=0, field_0xb4=2). Our old stub 0xe05b96b8 was Canon's "reset an
+ * ALREADY-prepared channel" -> it asserts Engine::Edmac.c:0x77C on the un-prepared mem2mem channels, leaving
+ * them un-armed so StartEDmac no-ops -> no completion IRQ -> WaitForAnyEventFlag 50ms timeout -> "Frame
+ * incomplete" every frame. FUN_e05b7b42 IS the prepare (verified: clears status arr, field_0xb4=2, Port<0x4c
+ * bounds check @Engine::Edmac.c:0x288; called by Canon Mem1Path/OrbbenPath/WbDetectionPath SetPath). */
+THUMB_FN(0xe05b7b42,  edmac_reset_channel)                  /* Canon per-channel PREPARE (FUN_e0535998 analog; was 0xe05b96b8 = reset-prepared-channel, wrong) */
+/* [M50mk2 RAW-VIDEO boomer fix, docs/32] These two were the WRONG boomer layer -- they pointed at the
+ * low-level per-InputPort setters (Engine::BoomerVdKick.c / Engine::BoomerSelector.c, arg = packed
+ * BoomerID>>16) instead of the Engine::Outer.c WRAPPERS that mem2mem (edmac-d8.c) calls with a RAW
+ * channel. Result: boomer mis-configured for the mem2mem WR/RD channels -> StartEDmac assert
+ * Engine::Edmac.c:0x770 -> crash on record. Correct wrappers take a raw channel, look up the per-channel
+ * boomer config table (DAT_e05b767c, stride 0x14), and are adjacent (kitor's EOS R VdKick e0535e64 ->
+ * Selector e0535ee2 pattern). Selector verified: bilal's 0x373f0126 passes its InSelType(0x100)/
+ * InSelEdmacType(0x20000000) checks for ch13/46. edmac_stop_boomer_maybe(0xe05b80c2) was already right. */
+THUMB_FN(0xe05b7520,  edmac_reset_boomer_vdkick)            /* Outer.c wrapper: raw chan -> low-level VdKick (was 0xe05b5720, wrong layer) */
+THUMB_FN(0xe05b752e,  edmac_select_boomer)                  /* Outer.c wrapper: (raw chan, bsel=0x373f0126) (was 0xe0683ca0, wrong layer) */
 THUMB_FN(0xe05b7c48,  RegisterEDmacCompleteCBR)             /* register EDMAC completion CBR (was NOP in fn_overrides) */
 THUMB_FN(0xe05b7f68,  UnregisterEDmacCompleteCBR)           /* unregister EDMAC completion CBR */
-THUMB_FN(0xe05b8f38,  edmac_reset_packunpack_mode)          /* reset pack/unpack mode */
+/* [M50mk2 RAW-VIDEO packunpack fix, docs/32] was 0xe05b8f38 = a 3-arg pack/unpack MODE SETTER
+ * f(channel, mode{1,2,3}, order{0,1}) writing desc+0xd8; edmac-d8.c calls it with ONE arg -> r1/r2
+ * garbage -> asserts Engine::Edmac.c:0x5EF (mode) x2 and 0x5DE (order) x1. 0xe05b8106 is the true
+ * 1-arg RESET leaf (zeroes desc+0x18/+0x1c/+0x20/+0x24 enable flags) = edmac_stop_boomer_maybe
+ * (0xe05b80c2) + 0x44 -- the exact reference delta on SX740 (ec52+0x44) and M50mk1 (a46e+0x44).
+ * (Its inverse sibling 0xe05b8146 sets those flags = the ARM step; NOT used, per the working ports.) */
+THUMB_FN(0xe05b8106,  edmac_reset_packunpack_mode)          /* leaf: 1-arg reset of pack/unpack + enable flags */
 THUMB_FN(0xe05b80c2,  edmac_stop_boomer_maybe)              /* stop Boomer for a write channel */
 THUMB_FN(0xe06b934e,  PwrMng_WakeSubChips)                  /* power on EDMAC sub-chips {0,7}; MUST precede EDMAC MMIO */
 THUMB_FN(0xe06b937c,  PwrMng_SuspendSubChips)               /* power off EDMAC sub-chips */

@@ -35,8 +35,12 @@
  * enters movie/raw via menu. Matches M50 mk1 (platform/M50.110/internals.h). */
 #define CONFIG_NO_DEDICATED_MOVIE_MODE
 
-/* hooking EFV_STATE ends with EvfCap crashes, requires investigation */
-//#define CONFIG_STATE_OBJECT_HOOKS
+/* [R3 mlv_lite, docs/31] Hook EvfDevState(*(0x10108)) for per-frame LV vsync. The old
+ * "EvfCap crash" comment was on non-R D8 with a WRONG EVF_STATE address; the serial-harness
+ * statespy proved hooking the real object (0x10108) runs cleanly during LiveView (no crash).
+ * The D8 vsync branch (input==6, old_state==3) lives in state-object.c. */
+#define CONFIG_STATE_OBJECT_HOOKS
+#define CONFIG_EVF_STATE_SYNC
 
 #define CONFIG_MALLOC_STRUCT_V2
 

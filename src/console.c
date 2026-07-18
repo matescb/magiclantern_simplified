@@ -15,6 +15,14 @@
 #endif
 
 #undef CONSOLE_DEBUG // logs things to file etc
+#ifdef CONFIG_M50mk2
+/* [M50mk2 observability, docs/31] Enable per-line ML/LOGS/console.log breadcrumbs. Each
+ * console_puts does FIO open+write+close, so every line is flushed to the card immediately
+ * and SURVIVES a hang/crash — after any freeze, pull the card and read ML/LOGS/console.log
+ * to see the last printf reached (e.g. exactly where raw_video_rec_task dies). Heavy/slow;
+ * debug build only. Paired with the serial harness + the init.c UART abort handler. */
+#define CONSOLE_DEBUG
+#endif
 
 #define CONSOLE_W 80
 #define CONSOLE_H 21

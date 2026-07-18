@@ -472,10 +472,18 @@ static void mlv_rec_call_cbr(uint32_t event, mlv_hdr_t *hdr)
 /* helper to write a MLV block into a FILE* and return if successful */
 static int32_t mlv_write_hdr(FILE* f, mlv_hdr_t *hdr)
 {
+    extern void m50ii_uart_str(const char *s);
+    static int wh_n = 0;
     mlv_rec_call_cbr(MLV_REC_EVENT_BLOCK, hdr);
 
     uint32_t written = FIO_WriteFile(f, hdr, hdr->blockSize);
 
+    {
+        char m[80];
+        snprintf(m, sizeof(m), "[wh] #%d hdr=0x%x bs=%d ret=%d\n",
+                 wh_n++, (uint32_t)hdr, (int)hdr->blockSize, (int)written);
+        m50ii_uart_str(m);
+    }
     return written == hdr->blockSize;
 }
 
@@ -2979,6 +2987,9 @@ unsigned int FAST raw_rec_vsync_setparam_cbr(unsigned int unused)
     return CBR_RET_CONTINUE;
 }
 
+/* [M50 II] fwd decl: structured atomic UART logger (defined near raw_video_rec_task). */
+static void m50ii_log_op(const char *op, const char *path, int ret);
+
 static const char* get_cf_dcim_dir()
 {
     static char dcim_dir[FIO_MAX_PATH_LENGTH];
@@ -3016,10 +3027,13 @@ static char* get_next_raw_movie_file_name()
         
         /* already existing file? */
         uint32_t size;
+        /* [M50 II] confirmed via atomic @ML> logging: this getsize is drive B/1, ret=0 (fine).
+         * The "Not mounted ID=0" was the benign is_dir("A:/") probe in get_cf_dcim_dir, NOT this.
+         * Do NOT atomic-log in this loop — 11x cli/sei during active raw capture stalls RawPro. */
         if( FIO_GetFileSize( filename, &size ) != 0 ) break;
         if (size == 0) break;
     }
-    
+
     return filename;
 }
 
@@ -3159,7 +3173,10 @@ int write_mlv_chunk_headers(FILE *f, int chunk, int card_index)
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&lens_hdr);
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&rtci_hdr);
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&wbal_hdr);
-        fail |= mlv_write_vers_blocks(f, mlv_start_timestamp);
+        /* [M50 II] SKIP VERS blocks: they write from a malloc'd HEAP buffer, which fails on mk2
+         * (every static-struct header write above succeeds; the heap write is the first to fail).
+         * VERS is optional module-version metadata. */
+        { extern void m50ii_uart_str(const char *s); m50ii_uart_str("[wh] SKIP vers\n"); }
     }
     
     /* write all queued blocks, if any */
@@ -3184,16 +3201,24 @@ int write_mlv_chunk_headers(FILE *f, int chunk, int card_index)
         return 0;
     }
     
+    extern void m50ii_uart_str(const char *s);
     int hdr_size = FIO_SeekSkipFile(f, 0, SEEK_CUR);
-    
-    /* insert a null block so the header size is multiple of 512 bytes */
-    mlv_hdr_t nul_hdr;
-    mlv_set_type(&nul_hdr, "NULL");
-    int padded_size = (hdr_size + sizeof(nul_hdr) + 511) & ~511;
-    nul_hdr.blockSize = padded_size - hdr_size;
-    if (FIO_WriteFile(f, &nul_hdr, nul_hdr.blockSize) != (int)nul_hdr.blockSize) return 0;
-    
-    return padded_size;
+    { char m[48]; snprintf(m, sizeof(m), "[wh] seek hdr_size=%d\n", hdr_size); m50ii_uart_str(m); }
+
+    /* insert a null block so the header size is multiple of 512 bytes.
+     * [M50 II] write it from a STATIC buffer (not a stack local): stack/heap buffers appear to
+     * fail SD writes on mk2 while static memory works; also avoids the original stack over-read. */
+    {
+        static char nul_buf[512];
+        mlv_hdr_t *nh = (mlv_hdr_t *)nul_buf;
+        mlv_set_type(nh, "NULL");
+        int padded_size = (hdr_size + (int)sizeof(mlv_hdr_t) + 511) & ~511;
+        nh->blockSize = padded_size - hdr_size;
+        int w = FIO_WriteFile(f, nul_buf, nh->blockSize);
+        { char m[64]; snprintf(m, sizeof(m), "[wh] nul bs=%d ret=%d\n", (int)nh->blockSize, w); m50ii_uart_str(m); }
+        if (w != (int)nh->blockSize) return 0;
+        return padded_size;
+    }
 }
 
 static GUARDED_BY(RawRecTask) int file_size_limit = 0;         /* have we run into the 4GB limit? */
@@ -3254,7 +3279,32 @@ int write_frames(FILE **pf, void *ptr, int group_size, int num_frames, int card_
         }
     }
     
-    int r = FIO_WriteFile(f, ptr, group_size);
+    /* [M50 II] D8/2GB FSU write DMA needs an UNCACHEABLE source. The mk2 port lacks CONFIG_MEM_2GB,
+     * so FIO_WriteFile passes the cacheable ptr and the FSU rejects high shoot-memory frame buffers
+     * ("[FirstEnt] Not mounted ID=0"). Alias low buffers into the 0x40000000 uncacheable window (the
+     * D8-2GB mapping); high buffers are already uncacheable. FIO_WriteFile still sync_caches() because
+     * the aliased ptr keeps bit 0x10000000 clear, so its CACHEABLE() test still passes. */
+    void *wbuf = (void *)(((uint32_t)ptr) | (((uint32_t)ptr) < 0x40000000 ? 0x40000000 : 0));
+    /* [M50 II Phase1.1] one-shot control write at FRAME-WRITE time (full RAW_RECORDING state, after
+     * hack_liveview): 4MB from the known-good 0x40000000 buffer to f. If this FAILS while the pre-
+     * recording [ctrl-pre] 4MB write SUCCEEDED => the RECORDING STATE (hack_liveview/capture) breaks
+     * SD writes, not the frame buffer. Also log the real frame ptr's region. */
+    {
+        extern void m50ii_uart_str(const char *s);
+        static int fctrl_done = 0;
+        (void)fctrl_done;
+    }
+    int r = FIO_WriteFile(f, wbuf, group_size);
+    /* [M50 II] atomic-log the FIRST frame write (ok or fail) + every failure. One-shot on
+     * success keeps it to a single cli/sei during capture (RawPro-safe). This is the decisive
+     * datum: do frame DATA writes happen and succeed, or does the first one fail (and on what)? */
+    {
+        static int fw_first = 1;
+        if (fw_first || r != (int)group_size) {
+            fw_first = 0;
+            m50ii_log_op(r == (int)group_size ? "framewrite-ok" : "framewrite-FAIL", raw_movie_filename, r);
+        }
+    }
 
     if (r != group_size) /* 4GB limit or card full? */
     {
@@ -3302,7 +3352,7 @@ int write_frames(FILE **pf, void *ptr, int group_size, int num_frames, int card_
         written_chunk[card_index] = write_mlv_chunk_headers(g, mlv_chunk, card_index);
         written_total[card_index] += written_chunk[card_index];
         
-        int r2 = written_chunk[card_index] ? FIO_WriteFile(g, ptr, group_size) : 0;
+        int r2 = written_chunk[card_index] ? FIO_WriteFile(g, wbuf, group_size) : 0;
         if (r2 == group_size) /* new chunk worked, continue with it */
         {
             printf("Success!\n");
@@ -3343,6 +3393,71 @@ void init_vsync_vars()
     fullsize_buffer_pos = 0;
     edmac_active = 0;
     skipped_frames = 0;
+}
+
+/* [M50 II] direct UART print (no FIO) — safe to call while the SD is unmounted. */
+extern void m50ii_uart_str(const char *s);
+
+/* [M50 II] Entering the raw/movie capture state transiently UNMOUNTS the still/LV FAT
+ * volume (bit 0x00200000 in the FAT descriptor @RAM 0x000aaf14). Any FIO op issued while
+ * unmounted trips Canon's "Not mounted" DebugMsg, which crashes (pc=0 lr=0xE05D1161) on
+ * this port. Poll the mount bit DIRECTLY (a pure memory read — no FIO, cannot crash) and
+ * only proceed with FIO once the volume is back. Returns 1 if mounted, 0 on timeout. */
+static int raw_wait_fat_mounted(int timeout_ms)
+{
+    for (int t = 0; t <= timeout_ms; t += 20)
+    {
+        if (*(volatile uint32_t *)0x000aaf14 & 0x00200000)
+            return 1;
+        msleep(20);
+    }
+    return 0;
+}
+
+/* [M50 II] ATOMIC UART line writer. Canon's debug console and ML share the SAME
+ * unlocked TX register (0xC0800000), so Canon's FIO error flood interleaves BYTE-WISE
+ * with m50ii_uart_str() and shreds our diagnostics mid-line (the host decoder then
+ * can't recover them). Write the whole line with IRQs disabled so it goes out
+ * contiguously and Canon's output queues until we're done. Keep lines short (IRQs
+ * are off for the duration; a ~80-char line is microseconds). Mirrors the MMIO of
+ * m50ii_uart_str (TX=0xC0800000, status=0xC0800014, TX-ready=bit1). */
+/* IRQ-off window MUST stay short during active raw capture, or the raw EDMAC/vsync
+ * IRQs are delayed and the RawPro engine misses deadlines (Engine::RawPro.c assert +
+ * stall). So bound the per-char TX-ready spin tightly (~a few us); if TX is congested,
+ * DROP the char rather than hold IRQs off waiting. A rarely-dropped char is fine — the
+ * @ML> sentinel + host decoder tolerate it, and not stalling the camera matters more. */
+static void m50ii_uart_atomic(const char *s)
+{
+    uint32_t old = cli();
+    volatile uint32_t *st = (volatile uint32_t *)0xC0800014;
+    volatile uint32_t *tx = (volatile uint32_t *)0xC0800000;
+    for (; *s; s++)
+    {
+        if (*s == '\n') { int g = 4000; while (!(*st & 2) && --g) {} if (*st & 2) { *st = 2; *tx = '\r'; } }
+        { int g = 4000; while (!(*st & 2) && --g) {} if (!(*st & 2)) continue; *st = 2; *tx = (uint32_t)(unsigned char)*s; }
+    }
+    sei(old);
+}
+
+/* [M50 II] structured atomic FIO-op log, decoded by tools/mlserial (mllog.py):
+ *   "@ML> <op> path=<path> ret=<ret>"
+ * The @ML> sentinel + atomic write make each line survive the shared-UART interleave,
+ * so `mllog markers` shows the EXACT failing FIO op + its path (which drive it hit). */
+static void m50ii_log_op(const char *op, const char *path, int ret)
+{
+    char msg[128];
+    snprintf(msg, sizeof(msg), "@ML> %s path=%s ret=%d\n", op, path ? path : "-", ret);
+    m50ii_uart_atomic(msg);
+}
+
+/* [M50 II bisect] log a tag + the live FAT mount bit (PURE read, no FIO), ATOMIC. */
+static void m50ii_mark(const char *tag)
+{
+    unsigned v = *(volatile uint32_t *)0x000aaf14;
+    char msg[96];
+    snprintf(msg, sizeof(msg), "@ML> mark %s aaf14=0x%x mounted=%d\n",
+             tag, v, (v & 0x00200000) ? 1 : 0);
+    m50ii_uart_atomic(msg);
 }
 
 static REQUIRES(RawRecTask) EXCLUDES(settings_sem)
@@ -3413,6 +3528,7 @@ void raw_video_rec_task(uint32_t card_index)
 
         /* disable Canon's powersaving (30 min in LiveView) */
         powersave_prohibit();
+
         /* wait for two frames to be sure everything is refreshed */
         wait_lv_frames(2);
 
@@ -3424,31 +3540,91 @@ void raw_video_rec_task(uint32_t card_index)
             goto cleanup;
         }
 
+        m50ii_mark("pre-setup_buffers");
         take_semaphore(settings_sem, 0);
         update_resolution_params();
         setup_buffers();
         setup_bit_depth();
         give_semaphore(settings_sem);
+        m50ii_mark("post-setup_buffers");
 
-        /* create output file */
-        raw_movie_filename = get_next_raw_movie_file_name();
-        if (raw_movie_filename == NULL)
+        /* [M50 II] Create the output file HERE, after the raw/movie capture-state
+         * transition. That transition transiently unmounts the FAT; wait for it to
+         * re-mount (pure bit poll, NO FIO) so FIO_* never runs while unmounted and
+         * never trips the "Not mounted" DebugMsg crash (pc=0 lr=0xE05D1161). */
         {
-            goto cleanup;
+            int mounted = raw_wait_fat_mounted(3000);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "[rawrec] fat mounted=%d bit=0x%x\n",
+                     mounted, (unsigned)(*(volatile uint32_t *)0x000aaf14));
+            m50ii_uart_str(msg);
+            if (!mounted) { NotifyBox(5000, "Card not mounted"); goto cleanup; }
+            msleep(50); /* settle after remount */
+        }
+        raw_movie_filename = get_next_raw_movie_file_name();
+        if (raw_movie_filename == NULL) { goto cleanup; }
+        /* [M50 II TEST] the get_cf_dcim_dir() subdir path (B:/DCIM/<folder>/M...MLV) fails every write with
+         * "FirstEnt Not mounted ID=0", but an in-rec-task probe proved B:/ ROOT writes succeed in the same state.
+         * Override the output to the card ROOT to isolate path-vs-handle (and likely fix it). */
+        {
+            static char m50ii_root_name[40];
+            snprintf(m50ii_root_name, sizeof(m50ii_root_name), "%s:/M50TEST.MLV",
+                     get_shooting_card()->drive_letter);
+            raw_movie_filename = m50ii_root_name;
+            m50ii_uart_str("[M50II] output override -> ");
+            m50ii_uart_str(m50ii_root_name);
+            m50ii_uart_str("\n");
         }
         strcpy(chunk_filename[card_index], raw_movie_filename);
-        f = FIO_CreateFile(raw_movie_filename);
-        if (!f)
-        {
-            NotifyBox(5000, "File create error");
-            goto cleanup;
-        }
 
+        m50ii_mark("pre-STARTING-cbr");
         /* Need to start the recording of audio before the init of the mlv chunk */
         mlv_rec_call_cbr(MLV_REC_EVENT_STARTING, NULL);
+        m50ii_mark("post-STARTING-cbr");
 
         init_mlv_chunk_headers(&raw_info);
+        /* [M50 II FIX] create the output file HERE, AFTER mlv_rec_call_cbr(MLV_REC_EVENT_STARTING) +
+         * init_mlv_chunk_headers. Those steps trigger an SD remount that invalidates any file handle
+         * opened before them (write to a pre-STARTING handle failed "FirstEnt Not mounted ID=0"; a
+         * handle opened AFTER them writes fine, as the in-rec-task probe proved). */
+        f = FIO_CreateFile(raw_movie_filename);
+        {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "[rawrec] create(post-STARTING) f=0x%x\n", (uint32_t)f);
+            m50ii_uart_str(msg);
+        }
+        if (!f) { NotifyBox(5000, "File create error"); goto cleanup; }
+        /* [M50 II DIAG] control write to the rec task's OWN handle f (known buffer+size), then rewind.
+         * SUCCEEDS => f is fine in-task, the header-data path is the culprit.
+         * FAILS    => f itself is bad in-task (even though a fresh probe handle writes fine). */
+        {
+            /* [M50 II Phase1.1] LARGE (4MB, multi-cluster) control write to f from a known-good
+             * buffer, BEFORE hack_liveview / RAW_RECORDING. Tests whether cluster extension on f
+             * works in the pre-recording state. */
+            int cw = FIO_WriteFile(f, (void *)0x40000000, 0x400000);
+            char msg[64];
+            snprintf(msg, sizeof(msg), "[ctrl-pre] 4MB-to-f ret=%d\n", cw);
+            m50ii_uart_str(msg);
+            FIO_SeekSkipFile(f, 0, 0 /* SEEK_SET */);
+        }
+        m50ii_mark("pre-write-hdr");
+        /* [M50 II probe] does a PLAIN RAM->B:/ root write work HERE, in the rec-task state
+         * (after setup_buffers grabbed shoot mem, RAW_PREPARING)? ret=512 => rec-task state is
+         * fine and the header write is special; ret=-1/create-fail => the state breaks ALL writes. */
+        {
+            char pmsg[72];
+            FILE *pf = FIO_CreateFile("B:/PROBE2.TXT");
+            if (pf) {
+                int w = FIO_WriteFile(pf, (void *)0x40000000, 512);
+                FIO_CloseFile(pf);
+                snprintf(pmsg, sizeof(pmsg), "[probe] root create OK write ret=%d\n", w);
+            } else {
+                snprintf(pmsg, sizeof(pmsg), "[probe] root create FAILED\n");
+            }
+            m50ii_uart_str(pmsg);
+        }
         written_total[card_index] = written_chunk[card_index] = write_mlv_chunk_headers(f, mlv_chunk, card_index);
+        m50ii_mark("post-write-hdr");
         if (!written_chunk[card_index])
         {
             NotifyBox(5000, "Card Full");

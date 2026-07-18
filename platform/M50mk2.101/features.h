@@ -40,6 +40,15 @@
 #define CONFIG_SGI_HANDLERS
 #define CONFIG_MMU_REMAP
 
+// [M50II Phase 1 exclusivity] NOTE: the GUI-input exclusivity hook (funcs[0]
+// @0xE021E460, mmu_patches.h) is a ROM CODE patch in region 0xE0200000 -- a DIFFERENT
+// 1MB region than the CONFIG_INIT1_HIJACK patch (PTR_INIT1_TASK 0xe00403c0, region
+// 0xE0000000) which claims the single default remap page/L2. A 2nd 1MB region would
+// need MMU_MAX_REMAP_PAGES>=2, but that measured _bss_end 0x160000 (>0x15fe00, the
+// Canon DryOS-pool starvation threshold) -> HW boot panic. There is no ML BSS to
+// reclaim. Solution = post-boot L2 reclaim of the init1-hijack page (see patch_mmu.c
+// mmu_reclaim_init1_page / apply_normal_patches, and docs/33). Kept at 1 page here.
+
 //~kitor: add bootdisk menu for easier testing on foreign camera :)
 #define FEATURE_BOOTFLAG_MENU
 

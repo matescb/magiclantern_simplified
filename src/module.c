@@ -2163,10 +2163,44 @@ static void module_unload_offline_strings(int mod_number)
     }
 }
 
-static void module_load_task(void* unused) 
+#ifdef CONFIG_M50mk2
+/* [M50mk2 boot-stability, docs/32] Wait (bounded, YIELDING) until the module directory is
+ * enumerable, i.e. the card FS is mounted. module_task can be created before the card mounts;
+ * probing FIO too early yields "[FIO] ERROR AcqSize/NextEnt Not mounted" plus a busy-retry that
+ * starves my_big_init_task from reaching big.8 (ml_started) -> ~24s hang -> hardware watchdog
+ * reboot (boot succeeded only ~17/38). is_dir(MODULE_PATH) runs the same FIO_FindFirstEx that
+ * _module_load_all() uses, so a success here guarantees the real scan will not spin. Returns 1 if
+ * the card became ready, 0 if it never mounted within the budget (well under the ~24s watchdog). */
+#define MODULE_CARD_WAIT_MS    200
+#define MODULE_CARD_WAIT_TRIES 50      /* up to ~10s */
+static int module_wait_card_ready(void)
+{
+    for (int i = 0; i < MODULE_CARD_WAIT_TRIES; i++)
+    {
+        if (is_dir(MODULE_PATH))
+            return 1;
+        msleep(MODULE_CARD_WAIT_MS);   /* yield so we never starve big.8 */
+    }
+    return 0;
+}
+#endif
+
+static void module_load_task(void* unused)
 {
     char *lockstr = "If you can read this, ML crashed last time. To save from faulty modules, autoload gets disabled.";
 
+#ifdef CONFIG_M50mk2
+    /* [M50mk2 boot-stability, docs/32] Do not touch the card until it is actually mounted.
+     * Otherwise the FIO scan below runs on an unmounted FS, busy-retries without yielding, and
+     * starves boot -> watchdog reboot; it also makes the crash-lockfile check give a false
+     * negative (unreadable card looks like "no lockfile"). If the card never mounts, skip loading
+     * this boot (safe: modules stay unloaded, TASK_LOOP still services the module msg queue). */
+    if (!module_wait_card_ready())
+    {
+        printf("module_task: card FS not mounted; skipping module load this boot\n");
+    }
+    else
+#endif
     if(!module_autoload_disabled)
     {
         uint32_t size;

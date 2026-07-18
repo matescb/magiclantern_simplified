@@ -82,7 +82,11 @@ const uint32_t mem2mem_devices[2] = {0, 7};
 uint32_t mem2mem_resources[2] = {0x100AD, 0x100BB};
 #define MEM2MEM_RD_CH 46
 #define MEM2MEM_WR_CH 13
-#define MEM2MEM_BOOMER_SELECTOR 0x373f0126
+/* [M50mk2, docs/32] bilal/SX740 used 0x373f0126 (InSelType nibble 0x100). On mk2 the boomer config
+ * table (base *(0xe05b767c)=0xE1087A8C) has ch13 InSelType=0x200, so the select wrapper 0xe05b752e
+ * asserts Engine::Outer.c:0x0A0 (sel&0xf00 != 0x200). Flip the InSelType nibble 1->2; the low byte
+ * 0x26 (the only bits that reach HW, written to boomer node 0x4E via 0xe0683ca0) is unchanged. */
+#define MEM2MEM_BOOMER_SELECTOR 0x373f0226
 #define MEM2MEM_MODE 0x0 // 1 - 32bit, 2 - 64bit, 3 - 128bit
 #define MEM2MEM_WAIT_MS 50
 
