@@ -292,10 +292,17 @@ void m50ii_handle_canon_gui_event(uint32_t type, uint32_t p1, uint32_t p2)
     {
         if (p2 == M50II_ST_PRESS)
         {
-            extern int module_send_keypress(int module_key);
-            module_send_keypress(27 /* MODULE_KEY_REC (module.h) */);
+            /* [M50 II] Deliver REC to mlv_lite via the module keypress CBR -- the CORRECT path.
+             * module_send_keypress() was WRONG here: it TRANSLATES a module key to a Canon key and
+             * INJECTS it (a no-op stub on this body), it does NOT reach the module. Instead build a
+             * raw event with param=BGMT_REC and call handle_module_keys(), which dispatches to
+             * CBR_KEYPRESS_RAW -> mlv_lite raw_rec_keypress_cbr_raw -> module_translate_key(BGMT_REC)
+             * = MODULE_KEY_REC -> raw_start_stop(). BGMT_REC is defined in platform/M50mk2.101/gui.h. */
+            extern int handle_module_keys(struct event * event);
+            struct event ev = { .type = 0, .param = BGMT_REC, .obj = 0, .arg = 0 };
+            handle_module_keys(&ev);
 #if M50II_MENU_INPUT_TRACE
-            m50ii_uart_str("[ML] menu-input: REC -> module_send_keypress(MODULE_KEY_REC)\n");
+            m50ii_uart_str("[ML] menu-input: REC -> handle_module_keys(BGMT_REC)\n");
 #endif
         }
         return;

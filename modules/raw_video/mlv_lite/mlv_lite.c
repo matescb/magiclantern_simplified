@@ -3279,12 +3279,12 @@ int write_frames(FILE **pf, void *ptr, int group_size, int num_frames, int card_
         }
     }
     
-    /* [M50 II] D8/2GB FSU write DMA needs an UNCACHEABLE source. The mk2 port lacks CONFIG_MEM_2GB,
-     * so FIO_WriteFile passes the cacheable ptr and the FSU rejects high shoot-memory frame buffers
-     * ("[FirstEnt] Not mounted ID=0"). Alias low buffers into the 0x40000000 uncacheable window (the
-     * D8-2GB mapping); high buffers are already uncacheable. FIO_WriteFile still sync_caches() because
-     * the aliased ptr keeps bit 0x10000000 clear, so its CACHEABLE() test still passes. */
-    void *wbuf = (void *)(((uint32_t)ptr) | (((uint32_t)ptr) < 0x40000000 ? 0x40000000 : 0));
+    /* [M50 II, docs/35] Pass the PLAIN cacheable buffer to FIO_WriteFile, which now does
+     * sync_caches() + UNCACHEABLE() centrally for M50mk2 (src/fio-ml.c). The old inline aliasing
+     * to the 0x40000000 window DEFEATED that sync_caches() guard: the aliased ptr failed
+     * FIO_WriteFile's `ptr == CACHEABLE(ptr)` test (CACHEABLE masks 0x40000000, not the 0x10000000
+     * this code assumed), so the cache flush was skipped and the FSU could read stale/torn frames. */
+    void *wbuf = ptr;
     /* [M50 II Phase1.1] one-shot control write at FRAME-WRITE time (full RAW_RECORDING state, after
      * hack_liveview): 4MB from the known-good 0x40000000 buffer to f. If this FAILS while the pre-
      * recording [ctrl-pre] 4MB write SUCCEEDED => the RECORDING STATE (hack_liveview/capture) breaks

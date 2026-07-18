@@ -42,6 +42,11 @@
 #define BGMT_WHEEL_UP                0xF5
 #define BGMT_WHEEL_DOWN              0xF6
 #define BGMT_LV                      0xF7
+/* [M50 II] ML intermediate code for the movie REC button (NOT a Canon keycode). The bridge maps
+ * the physical REC keycode (gui.c m50ii_rec_keycode) to a struct event{param=BGMT_REC} and calls
+ * handle_module_keys(); module_translate_key(BGMT_REC)->MODULE_KEY_REC -> mlv_lite raw_start_stop.
+ * Without this define module.c defaults BGMT_REC to -1 (never matches). 0x20 = free (cf M50 mk1). */
+#define BGMT_REC                     0x20
 /* what is that ?! */
 #define BGMT_UNPRESS_UDLR            0xF8
 
