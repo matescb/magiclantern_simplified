@@ -94,6 +94,50 @@ struct LockEntry * mem2mem_lock;
 uint32_t mem2mem_event;
 uint32_t mem2mem_status;
 
+/* [M50 II] Async CPU-copy worker (see edmac_copy_rectangle_cbr_start / m50ii_edmac_cpu_copy).
+ * The frame copy is initiated from the vsync/EVF CBR, which MUST NOT block. A synchronous CPU
+ * memcpy there monopolizes the CPU and starves Canon's real-time LV/DAF/EIS tasks -> hard crash.
+ * So the CBR just posts a request here and returns; this worker (normal priority, yields to RT)
+ * does the per-row memcpy and calls cbr_w on completion, honoring the async EDMAC contract. */
+/* task_create + ClearEventFlag come from the ML headers (dryos.h) included above. */
+
+static uint32_t cpu_copy_event = 0;
+static volatile struct {
+    uint32_t src, dst;
+    int w, h, spitch, dpitch;
+    void (*cbr_w)(void *);
+    volatile int pending;
+} cpu_req;
+
+static void cpu_copy_task(void)
+{
+    while (1)
+    {
+        WaitForAnyEventFlag(cpu_copy_event, 1, 1000);
+        ClearEventFlag(cpu_copy_event, 1);
+        if (cpu_req.pending)
+        {
+            for (int row = 0; row < cpu_req.h; row++)
+            {
+                memcpy((void *)(cpu_req.dst + (uint32_t)row * cpu_req.dpitch),
+                       (void *)(cpu_req.src + (uint32_t)row * cpu_req.spitch),
+                       cpu_req.w);
+            }
+            cpu_req.pending = 0;
+            if (cpu_req.cbr_w) cpu_req.cbr_w(NULL);
+        }
+    }
+}
+
+static void cpu_copy_worker_ensure(void)
+{
+    if (!cpu_copy_event)
+    {
+        cpu_copy_event = CreateEventFlag_strictly("M50iiCpuCopy");
+        task_create("cpu_copy", 0x17, 0x1000, (void *)cpu_copy_task, 0);
+    }
+}
+
 /* [M50mk2] arg comes in as the CBR context pointer (see RegisterEDmacCompleteCBR calls
  * below); we pass a small integer id (1 or 2) as that context. void* param keeps the
  * standard ML CBR signature so it matches edmac.h under -Werror. */
@@ -170,6 +214,8 @@ int m50ii_edmac_skip_reslock = 0;
 
 void edmac_memcpy_res_lock()
 {
+    cpu_copy_worker_ensure();   /* [M50 II] spin up the async CPU-copy worker (idles if unused) */
+
     if (!m50ii_edmac_skip_reslock)
     {
         mem2mem_lock = CreateResLockEntry(mem2mem_resources, sizeof(mem2mem_resources)/sizeof(mem2mem_resources[0]));
@@ -238,17 +284,23 @@ void* edmac_copy_rectangle_cbr_start(void *dst, void *src,
 
     if (m50ii_edmac_cpu_copy)
     {
-        /* [M50 II] CPU rectangle copy: w bytes/row for h rows, honoring the src/dst strides.
-         * src is already UNCACHEABLE (mlv_lite passes UNCACHEABLE(raw_info.buffer)) so reads are
-         * fresh DMA data; the slot is written by the CPU (FIO_WriteFile sync_caches's it later). */
-        for (int row = 0; row < h; row++)
-        {
-            memcpy((void *)(dst_adjusted + (uint32_t)row * dst_width),
-                   (void *)(src_adjusted + (uint32_t)row * src_width),
-                   w);
-        }
-        cbr_w(NULL);   // clears edmac_active (no completion CBR on this path)
-        return dst;
+        /* [M50 II] ASYNC CPU rectangle copy: post to the cpu_copy worker and return immediately.
+         * We are in the vsync/EVF CBR (mlv_lite process_frame) which MUST NOT block; a synchronous
+         * copy here hard-crashes the camera by starving Canon's RT tasks. The worker (normal prio,
+         * yields) does the per-row memcpy and calls cbr_w on completion. mlv_lite's edmac_active
+         * guard skips subsequent frames while a copy is still pending, so cpu_req can't be clobbered.
+         * src is already UNCACHEABLE (mlv_lite passes UNCACHEABLE(raw_info.buffer)) = fresh DMA. */
+        cpu_copy_worker_ensure();
+        cpu_req.src = src_adjusted;
+        cpu_req.dst = dst_adjusted;
+        cpu_req.w = w;
+        cpu_req.h = h;
+        cpu_req.spitch = src_width;
+        cpu_req.dpitch = dst_width;
+        cpu_req.cbr_w = cbr_w;
+        cpu_req.pending = 1;
+        SetEventFlag(cpu_copy_event, 1);
+        return dst;   // async: the worker calls cbr_w when the copy finishes
     }
 
     struct edmac_info src_region = {
