@@ -158,10 +158,27 @@ uint32_t mem2mem_emdac_copy_d8(void * src, void * dst, struct edmac_info * src_i
     return mem2mem_status == 3 ? 0 : 1;
 }
 
+/* [M50 II, docs/32] Runtime A/B switch to skip the engine RESOURCE LOCK while keeping the
+ * PwrMng subchip wake. Ghidra RE showed LockEngineResources() sets a whole-recording software
+ * owner-flag on the shared category-1 engine resource nodes {0x100AD,0x100BB} (from bilal M50
+ * mk1 -- may be the WRONG resources for this body); when held for the whole clip, Canon's DAF
+ * (DAFPath_SetDAFParam waits 1000ms then times out) + EIS (TryPostEvent fails 0xd = the same
+ * "engine busy" code LockEngineResources returns on contention) starve -> the storm + no vsync
+ * frames. Toggle live: `wr &m50ii_edmac_skip_reslock 1` -> record -> does the storm stop and do
+ * frames capture? (=> the lock/resource IDs are the culprit). `wr ... 0` restores stock. */
+int m50ii_edmac_skip_reslock = 0;
+
 void edmac_memcpy_res_lock()
 {
-    mem2mem_lock = CreateResLockEntry(mem2mem_resources, sizeof(mem2mem_resources)/sizeof(mem2mem_resources[0]));
-    LockEngineResources(mem2mem_lock);
+    if (!m50ii_edmac_skip_reslock)
+    {
+        mem2mem_lock = CreateResLockEntry(mem2mem_resources, sizeof(mem2mem_resources)/sizeof(mem2mem_resources[0]));
+        LockEngineResources(mem2mem_lock);
+    }
+    else
+    {
+        mem2mem_lock = 0;
+    }
 
     PwrMng_WakeSubChips(mem2mem_devices);
 }
@@ -169,7 +186,10 @@ void edmac_memcpy_res_lock()
 void edmac_memcpy_res_unlock()
 {
     PwrMng_SuspendSubChips(mem2mem_devices);
-    UnLockEngineResources(mem2mem_lock);
+    if (mem2mem_lock)
+    {
+        UnLockEngineResources(mem2mem_lock);
+    }
 }
 
 // reimplement this wonderful function with mem2mem_emdac_copy_d8
