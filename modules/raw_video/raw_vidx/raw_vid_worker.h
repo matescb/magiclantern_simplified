@@ -14,7 +14,13 @@ enum recording_state get_recording_state(void);
 // These specific values were empirically determined on 200D and are
 // unlikely to work well on all cams.  More testing is needed.
 #define WORKER_PRIO 0x11
-#define WORKER_WRITE_PRIO 0x9
+// [M50 II] 0x9 (a 200D value) is HIGHER priority than Canon's EvfDev/LiveView tasks, so the big
+// per-buffer FIO_WriteFile STARVES the EvfDev task for the duration of the write -> its message
+// queue overflows -> LiveViewDrive::EvfDevState.c L:372/542 nullptr assert FLOOD the instant the
+// write finishes -> the camera stalls and can't cleanly stop/close the MLV (frames lost). RE'd via
+// Ghidra: the asserts are EvfDev TryPostEvent(evfdev+0x8) failures from Canon's LvComPack path.
+// Drop the write task well below Canon's LV tasks (~0x0-0x13) so EvfDev keeps draining mid-write.
+#define WORKER_WRITE_PRIO 0x1A
 
 // Used to get space for our local buffers.  This is the initial
 // size attempted, we reduce from their until success.

@@ -18,6 +18,11 @@ static struct semaphore *edmac_sem = NULL;
 
 static enum recording_state recording_state = INACTIVE;
 
+/* [M50 II] Poll Canon's async raw-job "ready" flags after raw_lv_request() before consuming frames,
+ * to avoid the intermittent MvRawProDs/RawPro/LvJob ring-overflow assert STORM. Default 1 (on).
+ * Runtime A/B: `wr <resolved-addr> 0`. */
+int rvx_wait_raw_job = 1;
+
 static struct mlv_session session = {
     .fps = 0,
     .res_x = 0,
@@ -147,6 +152,9 @@ static void edmac_cbr_r(void *unused_ctx)
 static void edmac_cbr_w(void *unused_ctx)
 {
     edmac_copy_rectangle_adv_cleanup();
+    // [M50 II] confirm completion fires; rate-limited so it doesn't flood at frame rate.
+    static int cbrw_n = 0;
+    if (cbrw_n < 5) { SEND_LOG_DATA_STR("cbr_w: give sem\n"); cbrw_n++; }
     give_semaphore(edmac_sem); // signal edmac copy rect as safe to use
 }
 
@@ -184,7 +192,10 @@ static void write_buf_to_disk(struct crop_buf *crop_buf)
     #ifdef RAW_VID_LOG
     uint32_t start_time = get_ms_clock();
     #endif
+    SEND_LOG_DATA_STR("worker: writing crop_buf -> card\n");
+    RVX_HEX("wbytes", (uint32_t)(crop_buf->cur - crop_buf->start));
     FIO_WriteFile(raw_vid_fp, crop_buf->start, crop_buf->cur - crop_buf->start);
+    SEND_LOG_DATA_STR("worker: FIO_WriteFile done\n");
     #ifdef RAW_VID_LOG
     uint32_t end_time = get_ms_clock();
     uint32_t data_rate_x100 = (uint32_t)((float)(crop_buf->cur - crop_buf->start) / 1024 / 1024
@@ -277,8 +288,10 @@ static void worker(void)
 
             if (crop_buf == NULL)
             {
-                // FIXME we should stop here
-                SEND_LOG_DATA_STR("ERROR: crop_buf was NULL at dst check\n");
+                // FIXME we should stop here.
+                // [M50 II] Rate-limit: this used to flood the UART and make serial unusable.
+                static int cbnull_n = 0;
+                if (cbnull_n < 5) { SEND_LOG_DATA_STR("ERROR: crop_buf was NULL at dst check\n"); cbnull_n++; }
                 break;
             }
 
@@ -348,7 +361,9 @@ static void worker(void)
                 // If this happens, it means we're not managing to save a frame
                 // before the next vsync event in event_pusher.c tries to capture one.
 
-                SEND_LOG_DATA_STR("ERROR: worker couldn't take edmac_sem\n");
+                // [M50 II] Rate-limited (was flooding the UART).
+                static int sem_err_n = 0;
+                if (sem_err_n < 5) { SEND_LOG_DATA_STR("ERROR: worker couldn't take edmac_sem\n"); sem_err_n++; }
                 // FIXME this break means we're choosing to drop frames
                 // rather than stop recording, I think just stopping is better.
                 // Maybe re-imp the option from mlv_lite.
@@ -382,14 +397,43 @@ static void worker(void)
             // The extra cost for doing a memcpy() to align should be tiny,
             // alignment requirement is 0x10 on Digic 5.
 
-            edmac_copy_rectangle_cbr_start(
-                (void*)dst, event->src,
-                raw_info.pitch, (event->x + 7)/8*BPP, event->y/2*2,
-                line_size, 0, 0,
-                line_size, event->h,
-                &edmac_cbr_r, &edmac_cbr_w, NULL
-            );
-            // edmac_cbr_w() will release edmac sem, when copy complete
+            // [M50 II raw_vidx bring-up] dispatch geometry, first few frames only.
+            {
+                static int wk_log_n = 0;
+                if (wk_log_n < 3)
+                {
+                    RVX_HEX("wk.dst",        (uint32_t)dst);
+                    RVX_HEX("wk.cbuf.start", (uint32_t)crop_buf->start);
+                    RVX_HEX("wk.cbuf.end",   (uint32_t)crop_buf->end);
+                    RVX_HEX("wk.src",        (uint32_t)event->src);
+                    RVX_HEX("wk.pitch",      raw_info.pitch);
+                    RVX_HEX("wk.line_size",  line_size);
+                    RVX_HEX("wk.h",          event->h);
+                    wk_log_n++;
+                }
+            }
+
+            // [M50 II raw_vidx] SYNCHRONOUS inline CPU crop-copy.
+            // The async D8 cpu_copy worker behind edmac_copy_rectangle_cbr_start does NOT reliably
+            // fire its completion CBR on this cam, so edmac_sem never returns and every frame drops
+            // (the "couldn't take edmac_sem" -> "crop_buf NULL" flood). We run in the dedicated
+            // worker task (off the capture/vsync path), so a plain per-row memcpy here is safe and
+            // deterministic; release edmac_sem directly via edmac_cbr_w() when done. This also
+            // avoids the mem2mem EDMAC engine (DAF/EIS storm) and the core-side sync change (which
+            // shifts symbols and destabilises boot). src = UNCACHEABLE(raw_info.buffer) (Change C).
+            {
+                uint32_t sp    = raw_info.pitch;                                   // src stride
+                uint32_t dp    = (uint32_t)line_size;                              // dst stride
+                uint32_t sbase = (uint32_t)event->src
+                               + (uint32_t)((event->x + 7)/8*BPP)                  // src_x (bytes)
+                               + (uint32_t)((event->y/2*2)) * sp;                  // src_y * pitch
+                uint32_t dbase = (uint32_t)dst;
+                for (int row = 0; row < (int)event->h; row++)
+                    memcpy((void*)(dbase + (uint32_t)row * dp),
+                           (void*)(sbase + (uint32_t)row * sp),
+                           (uint32_t)line_size);
+                edmac_cbr_w(NULL); // adv_cleanup no-op on D8 + give_semaphore(edmac_sem)
+            }
 
             break;
 
@@ -431,8 +475,54 @@ static void worker(void)
                 #endif
                 crop_buf = &crop_bufs[0];
 
+                SEND_LOG_DATA_STR("worker: COMMAND_START -> raw_lv_request\n");
                 // Set LV to raw
                 raw_lv_request();
+                SEND_LOG_DATA_STR("worker: raw_lv_request done\n");
+
+                // [M50 II] Wait for Canon's ASYNC raw-job build before consuming frames.
+                // raw_lv_request -> lv_save_raw(1) only sets a FLAG; Canon then builds the movie-raw
+                // job (MvRawProDs Create -> RawPro connect -> drive start) asynchronously, a VARIABLE
+                // number of VDs later. If our vsync CBR starts pulling frames before that build+drain
+                // is up, Canon's 2-slot per-VD ring overflows -> Engine::MvRawProDs.c:293 /
+                // Engine::RawPro.c:452 / LiveViewCore::LvJob.c:213 nullptr assert STORM (intermittent
+                // ~50%, wedges the record). RE'd via Ghidra: MvRawProDs ctx = *(0xE07B9ED4), its
+                // "created" flag at ctx+0x30 -> 1 when built; RawPro ctx = *(0xE0761240), RawPath
+                // connection handle at ctx+0x30 -> nonzero when connected. Poll both (bounded) BEFORE
+                // going ACTIVE. NOTE: wait_lv_frames(2) BEFORE lv_save_raw (the mk1 recipe) is the
+                // WRONG gate -- the race is AFTER lv_save_raw. Runtime A/B: `wr &rvx_wait_raw_job 0`.
+                if (rvx_wait_raw_job)
+                {
+                    volatile uint32_t *mvraw_pp  = (volatile uint32_t *)0xE07B9ED4;
+                    volatile uint32_t *rawpro_pp = (volatile uint32_t *)0xE0761240;
+                    int ready = 0;
+                    for (int i = 0; i < 75; i++)   // up to ~75 * 20ms = 1.5s
+                    {
+                        uint32_t m = *mvraw_pp;
+                        uint32_t p = *rawpro_pp;
+                        if (m != 0 && *(volatile uint32_t *)(m + 0x30) == 1 &&
+                            p != 0 && *(volatile uint32_t *)(p + 0x30) != 0)
+                        { ready = 1; break; }
+                        msleep(20);
+                    }
+                    if (ready)
+                    {
+                        SEND_LOG_DATA_STR("worker: raw job READY (MvRawProDs created)\n");
+                        msleep(50); // let the drain run a couple VDs before we consume
+                    }
+                    else
+                    {
+                        SEND_LOG_DATA_STR("worker: WARN raw job not ready (timeout) -- proceeding\n");
+                    }
+                }
+
+                // [M50 II] Do NOT seed the EDMAC completion-CBR table here.
+                // Live HW test (boot 205, wr m50ii_seed_cbrs=0) proved the seed's no-op stub on the
+                // channel Canon's lv_save_raw job drives leaves that completion IRQ un-acked ->
+                // Engine::MvRawProDs/RawPro/LvJob nullptr + a [kern] interrupt STORM that wedges the
+                // camera. The working M50 mk1 reference (bilal) never seeds. Without the seed there
+                // is no pc=0 crash here (Canon registers its own CBR on the raw channel), and no
+                // storm. The seed remains available for the mem2mem path via edmac_memcpy_res_lock.
 
                 // Get new save file
                 if (raw_vid_fp != NULL)
@@ -495,12 +585,32 @@ static void worker(void)
             // until finished.
             if (recording_state == ACTIVE)
             {
-                // restore LV away from raw
-                // This ML asserts if you haven't paired it with raw_lv_request(),
-                // but is safe.
+                // [M50 II] Finalize + CLOSE the MLV FIRST, before raw_lv_release().
+                // raw_lv_release() can fault on the D8 raw-LV teardown (LiveViewDrive::EvfDevState
+                // nullptr); closing first means the frames already written are committed to a
+                // valid, decodable file even if the teardown then wedges. On a frame-count update
+                // error we still close (never leave the handle dangling / data unflushed).
+                if (raw_vid_fp != NULL)
+                {
+                    err = update_video_frame_count(video_frame_count, header_buf, header_buf + header_size);
+                    if (err)
+                        SEND_LOG_DATA_STR("ERROR: couldn't update video frame count (closing anyway)\n");
+                    // write back the header (now with the final frame count); file is complete
+                    FIO_SeekSkipFile(raw_vid_fp, 0, SEEK_SET);
+                    FIO_WriteFile(raw_vid_fp, header_buf, header_size);
+                    FIO_CloseFile(raw_vid_fp);
+                    raw_vid_fp = NULL;
+                    SEND_LOG_DATA_STR("worker: MLV closed (finalized)\n");
+                }
+                else
+                {
+                    SEND_LOG_DATA_STR("ERROR: unexpected fp state in worker\n");
+                }
+
+                // restore LV away from raw. This ML asserts if not paired with raw_lv_request(),
+                // but is safe; on M50 II it may fault (EvfDevState) -- the file is already closed.
                 raw_lv_release();
-                // TODO mlv_lite does restore_bit_depth(), we
-                // don't mess with this yet.
+                // TODO mlv_lite does restore_bit_depth(), we don't mess with this yet.
 
                 #ifdef RAW_VID_LOG
                 snprintf(log_buf, buf_size, "session time, data written: %d, %d\n",
@@ -509,8 +619,7 @@ static void worker(void)
                 session_data_size = 0;
                 #endif
 
-                // FIXME we want to handle any potential flushing before freeing stuff,
-                // we may need buffers for dealing with queued frames.
+                // free crop buffers
                 crop_buf = NULL;
                 if (crop_bufs[0]._buf != NULL)
                 {
@@ -527,30 +636,6 @@ static void worker(void)
                     crop_bufs[1].start = NULL;
                     crop_bufs[1].cur = NULL;
                     crop_bufs[1].end = NULL;
-                }
-
-                if (raw_vid_fp != NULL)
-                {
-                    // TODO flush pending data
-
-                    // update with the final video frame count
-                    err = update_video_frame_count(video_frame_count, header_buf, header_buf + header_size);
-                    if (err)
-                    {
-                        SEND_LOG_DATA_STR("ERROR: couldn't update video frame count\n");
-                        break;
-                    }
-
-                    // write back; file is now complete
-                    FIO_SeekSkipFile(raw_vid_fp, 0, SEEK_SET);
-                    FIO_WriteFile(raw_vid_fp, header_buf, header_size);
-
-                    FIO_CloseFile(raw_vid_fp);
-                    raw_vid_fp = NULL;
-                }
-                else
-                {
-                    SEND_LOG_DATA_STR("ERROR: unexpected fp state in worker\n");
                 }
 
                 stop_mlv_session();
