@@ -2190,6 +2190,18 @@ static void module_load_task(void* unused)
     char *lockstr = "If you can read this, ML crashed last time. To save from faulty modules, autoload gets disabled.";
 
 #ifdef CONFIG_M50mk2
+    /* [2026-07-19 BOOT-RELIABILITY] The core boot is now ~10s (was ~44s). At ~10s Canon's storage
+     * is still inside its FAT (re)mount window (docs/32): FIO from module_task here faults
+     * intermittently (@module_task AcqSize ecode=0x100b -> data abort -> the one-shot [AB] handler
+     * HANGS the whole boot at big.7, ~40% of cold boots). The old slow boot loaded modules long
+     * after that window closed, so it never hit this. Sleep past the window before touching the
+     * card. This does NOT delay big.8 (module_task is a separate task) -- it only defers optional
+     * module load by ~10s, preserving the fast boot while removing the big.7 hang.
+     * [2026-07-21 raw_vidx] Bumped 10000->30000: raw_vidx's vsync CBR NULL-derefs a Canon
+     * movie-state global if it registers before Canon's movie subsystem is ready (~crash at
+     * load ~20s on the fast boot; the old 44s boot loaded modules ~40s and was fine). Loading
+     * modules ~40s clears it. big.8 (core) is unaffected -- this only defers optional-module load. */
+    msleep(30000);
     /* [M50mk2 boot-stability, docs/32] Do not touch the card until it is actually mounted.
      * Otherwise the FIO scan below runs on an unmounted FS, busy-retries without yielding, and
      * starves boot -> watchdog reboot; it also makes the crash-lockfile check give a false

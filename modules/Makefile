@@ -54,7 +54,8 @@ ML_MODULES = \
     dev_tools/edmac \
     sd_uhs \
     raw_video/raw_vidx \
-    yolo
+    yolo \
+    wifidep
 
 .PHONY: clean $(BUILD_DIR)
 

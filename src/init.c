@@ -921,7 +921,9 @@ static void m50ii_osd_try(void)
      * indexed OSD -> layer + recomposites; confirms the whole ML OSD path end to end. */
     bmp_printf(FONT_LARGE, 120, 60,  "Magic Lantern - EOS M50 Mark II");
     bmp_printf(FONT_LARGE, 120, 120, "OSD layer LIVE (shoot 2MB -> XCM L2 -> VMIX)");
-    for (int rep = 0; rep < 25; rep++) { ml_refresh_display_needed = 1; msleep(200); }
+    /* [2026-07-19 BOOT-SPEED] was 25 reps (~5s). This runs after ml_started; the bmp.c redraw_task
+     * keeps compositing our layer afterwards, so a short kick to latch the OSD is enough. */
+    for (int rep = 0; rep < 8; rep++) { ml_refresh_display_needed = 1; msleep(200); }
 
     for (uint32_t l = 0; l < 4; l++)
         mlog_kv("[ML] osd-try: post-layer MARV", (uint32_t)Get(ctx, l));
@@ -948,51 +950,25 @@ static void my_big_init_task()
     m50ii_wait_canon_subsystems();
     m50ii_uart_str("[ML] big.1b: canon-subsystems wait done\n");
 
-    /* [M50II TIER1-DIAG 2026-07-10] One-boot race-vs-hard-fail probe for BOTH Tier-1 gaps
-     * (display compositor + SD mount), placed in the YIELDING my_big_init_task context so the
-     * msleep(150) gives Canon's OWN tasks CPU to finish RENDERER/VMIX graphics init and the SD
-     * FileMgr mount (a busy-spin here would starve Canon and manufacture a false HARD-FAIL).
-     * Each ~150ms sample records: display surface *0x7F1B4 (RENDERER surf-array[0] MARV) + its
-     * cache *0x11264, and mount via is_file("B:/AUTOEXEC.BIN") (known-present) + is_dir("B:/ML").
-     * A signal that flips 0->nonzero = RACE (fix: add a wait-gate). Never flips over ~4.5s =
-     * HARD-FAIL (fix: RE the missing SD-IRQ / MPU property). First-good sample+us logged per
-     * signal. Diagnostic only — remove for the keeper build. */
-#define M50II_TIER1_DIAG 1
-#if M50II_TIER1_DIAG
+    /* [M50II 2026-07-19 BOOT-SPEED+RELIABILITY] Card-mount-ready gate.
+     * Canon's SD FileMgr mounts asynchronously; _load_fonts (big.5) and config_load (big.7)
+     * below both read B:/ML, so racing ahead of the mount yields a fontless / config-less boot.
+     * This REPLACES the old 30x150ms tier1-diag sampling loop, which incidentally (and always)
+     * spent a flat ~4.5s here. Same yielding poll — Canon's storage task gets CPU between
+     * checks — but it EXITS THE INSTANT the card is visible, so a normal fast mount costs well
+     * under a second. Bounded (~6s cap) so a genuinely absent card falls through instead of
+     * hanging; module_task keeps its own independent mount gate (module.c). See docs/32. */
     {
-        volatile uint32_t *US = (volatile uint32_t *)0xC0242014;   /* free-running microsecond timer */
-        uint32_t t0 = *US;
-        int disp_first = -1, mnt_first = -1, mld_first = -1;
-        uint32_t disp_us = 0, mnt_us = 0, mld_us = 0;
-        char hb[12];
-        m50ii_uart_str("[ML] tier1-diag START: surf 0x7F1B4/0x11264 + mount B:/ (~4.5s, yielding)\n");
-        for (int s = 0; s < 30; s++)
+        int mounted = 0;
+        for (int i = 0; i < 60; i++)   /* ~6s cap, 100ms steps; is_file is the known-present sentinel */
         {
-            uint32_t surf  = *(volatile uint32_t *)0x0007F1B4;
-            uint32_t surfc = *(volatile uint32_t *)0x00011264;
-            int mnt = is_file("B:/AUTOEXEC.BIN");   /* known-present file: succeeds iff FS mounted */
-            int mld = is_dir("B:/ML");
-            uint32_t el = *US - t0;
-            m50ii_uart_str("[ML] t1 s="); m50ii_uart_str(m50ii_hex(hb, (uint32_t)s));
-            m50ii_uart_str(" us=");       m50ii_uart_str(m50ii_hex(hb, el));
-            m50ii_uart_str(" surf=");     m50ii_uart_str(m50ii_hex(hb, surf));
-            m50ii_uart_str(" surfc=");    m50ii_uart_str(m50ii_hex(hb, surfc));
-            m50ii_uart_str(mnt ? " mntB=1" : " mntB=0");
-            m50ii_uart_str(mld ? " mlD=1\n" : " mlD=0\n");
-            if (disp_first < 0 && (surf || surfc)) { disp_first = s; disp_us = el; }
-            if (mnt_first  < 0 && mnt)             { mnt_first  = s; mnt_us  = el; }
-            if (mld_first  < 0 && mld)             { mld_first  = s; mld_us  = el; }
-            msleep(150);   /* YIELD so Canon's graphics/storage tasks get CPU to finish bring-up */
+            if (is_file("B:/AUTOEXEC.BIN")) { mounted = 1; break; }   /* succeeds iff FAT mounted */
+            msleep(100);   /* yield so Canon's storage/mount task gets CPU */
         }
-        if (disp_first >= 0) mlog_kv("[ML] tier1-diag VERDICT display=RACE first_us", disp_us);
-        else                 m50ii_uart_str("[ML] tier1-diag VERDICT display=HARD-FAIL (surface never populated)\n");
-        if (mnt_first  >= 0) mlog_kv("[ML] tier1-diag VERDICT mount=RACE first_us", mnt_us);
-        else                 m50ii_uart_str("[ML] tier1-diag VERDICT mount=HARD-FAIL (B:/ never mounted)\n");
-        if (mld_first  >= 0) mlog_kv("[ML] tier1-diag VERDICT B:/ML first_us", mld_us);
-        else                 m50ii_uart_str("[ML] tier1-diag VERDICT B:/ML never seen\n");
-        m50ii_uart_str("[ML] tier1-diag END\n");
+        m50ii_uart_str(mounted
+            ? "[ML] big.1c: card mount ready\n"
+            : "[ML] big.1c: card mount NOT ready after ~6s -> proceeding (module_task re-gates)\n");
     }
-#endif /* M50II_TIER1_DIAG */
 
 #if defined(CONFIG_M50mk2)
     /* [M50II PHASE-A] Capture display ground-truth AFTER the tier1-diag yield (Canon's
@@ -1339,6 +1315,14 @@ void __attribute__((used)) m50ii_abort_report(uint32_t *ctx, uint32_t spsr, uint
 {
     extern void m50ii_uart_str(const char *);
     char b[12];
+    /* [M50II 2026-07-18] ONE-SHOT guard: dump the FIRST fault in full, once; any subsequent abort
+     * (incl. the same fault re-firing) spins quietly. The old handler looped forever (10000+ lines)
+     * which flooded/shredded the one clean dump we need and hard-hung the core. A pc=0 prefetch
+     * abort cannot be cleanly resumed, so this is a DIAGNOSIS aid -- the real prevention for the
+     * raw-record crash is seeding the EDMAC completion-CBR slots (see edmac-d8.c). */
+    static volatile int m50ii_abort_fired = 0;
+    if (m50ii_abort_fired) { for (;;) { for (volatile uint32_t d = 0; d < 0x4000000; d++) { } } }
+    m50ii_abort_fired = 1;
     uint32_t dfsr, dfar, ifsr, ifar;
     __asm__ volatile("mrc p15,0,%0,c5,c0,0" : "=r"(dfsr));   /* Data Fault Status   */
     __asm__ volatile("mrc p15,0,%0,c6,c0,0" : "=r"(dfar));   /* Data Fault Address  */
@@ -1384,10 +1368,11 @@ void __attribute__((used)) m50ii_abort_report(uint32_t *ctx, uint32_t spsr, uint
             }
         }
     }
-    m50ii_uart_str("[ABORT] HANG (fault captured; looping short dump)\n");
-    /* [M50II 2026-07-11] Re-print a SHORT line forever (busy-delay; abort ctx has no scheduler) so
-     * the lossy J-Link VCOM (drops chars at 115200 under load) eventually passes a clean copy. */
-    for (;;)
+    m50ii_uart_str("[ABORT] HANG (one-shot dump complete)\n");
+    /* [M50II 2026-07-18] Re-print a SHORT line a BOUNDED number of times (lossy J-Link VCOM drops
+     * chars at 115200 under load, so repeat a bit to pass a clean copy), then spin QUIETLY -- no
+     * more infinite 10000+ line flood that shredded the log and hung the core forever. */
+    for (int k = 0; k < 12; k++)
     {
         m50ii_uart_str("[AB] pc="); m50ii_uart_str(m50ii_hex(b, pc));
         m50ii_uart_str(" lr="); m50ii_uart_str(m50ii_hex(b, flr));
@@ -1395,6 +1380,7 @@ void __attribute__((used)) m50ii_abort_report(uint32_t *ctx, uint32_t spsr, uint
         m50ii_uart_str("\n");
         for (volatile uint32_t d = 0; d < 0x1000000; d++) { }   /* crude inter-print delay */
     }
+    for (;;) { for (volatile uint32_t d = 0; d < 0x8000000; d++) { } }   /* quiet spin */
 }
 
 /* THUMB stubs (SCTLR.TE=1). Entry: Abort/Undef mode, Thumb state. LR = faulting
@@ -1641,9 +1627,14 @@ static void mlog_kv(const char *label, uint32_t v)   /* "<label>=0x........\n" (
 /* [M50II 2026-07-11] UART-independent progress beacon: the J-Link VCOM drops chars under Canon's
  * DebugMsg flood past post.0c, so blink the card LED N times (busy-delay, no scheduler) to SEE the
  * true boot frontier. Distinct N per checkpoint; user watches the LED and reports the highest N. */
+#ifndef M50II_LED_BEACONS
+#define M50II_LED_BEACONS 0   /* [2026-07-19 BOOT-SPEED] LED beacons cost ~7-8s of blocking spin on the
+                               * critical path; the UART "[ML] big.N" markers now supersede them
+                               * (duplex link proven). Set to 1 only for a headless LED-only bring-up. */
+#endif
 static void m50ii_led_blink(uint32_t n)
 {
-#if defined(CARD_LED_ADDRESS) && defined(LEDON) && defined(LEDOFF)
+#if M50II_LED_BEACONS && defined(CARD_LED_ADDRESS) && defined(LEDON) && defined(LEDOFF)
     for (volatile uint32_t g = 0; g < 0x3000000; g++) { }        /* gap BEFORE group (separates counts) */
     for (uint32_t k = 0; k < n; k++)
     {

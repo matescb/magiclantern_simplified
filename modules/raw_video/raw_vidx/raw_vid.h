@@ -4,12 +4,22 @@
 #undef RAW_VID_LOG
 //#define RAW_VID_LOG 1
 
-#ifdef RAW_VID_LOG
-    #include "log.h"
-    #define SEND_LOG_DATA_STR(s) send_log_data_str(s)
-#else
-    #define SEND_LOG_DATA_STR(s) ;
-#endif
+/* [M50 II debug] Route the module's telemetry to the SERIAL UART (core m50ii_uart_str @0xcf1ef,
+ * resolved at module load), because send_log_data_str only reaches the on-screen ML console, which
+ * is invisible over serial -- that blindness cost us hours. Every existing SEND_LOG_DATA_STR call
+ * now emits "[RVX] <msg>" over UART; grep run/uart.log (or `mllog`) for "[RVX]". RVX_HEX(tag,val)
+ * logs a hex value. Not atomic (may interleave with Canon output) but greppable. */
+extern void m50ii_uart_str(const char *);
+#define SEND_LOG_DATA_STR(s) do { m50ii_uart_str("[RVX] "); m50ii_uart_str(s); } while (0)
+static inline void rvx_hex(const char *tag, uint32_t v)
+{
+    char b[11]; const char *h = "0123456789ABCDEF";
+    b[0] = '0'; b[1] = 'x';
+    for (int i = 0; i < 8; i++) b[2 + i] = h[(v >> ((7 - i) * 4)) & 0xF];
+    b[10] = 0;
+    m50ii_uart_str("[RVX] "); m50ii_uart_str(tag); m50ii_uart_str("="); m50ii_uart_str(b); m50ii_uart_str("\n");
+}
+#define RVX_HEX(tag, v) rvx_hex((tag), (uint32_t)(v))
 
 // While we do send an event for every frame pushed,
 // the queue receiving them doesn't need to be very long,

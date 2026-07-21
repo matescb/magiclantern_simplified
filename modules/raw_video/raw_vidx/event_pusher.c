@@ -40,6 +40,21 @@
 //#define MLV_3_CROP_WIDTH 2048
 //#define MLV_3_CROP_HEIGHT 896
 
+/* [M50 II raw_vidx bring-up] Capture-source selector.
+ *   1 = read the raw frame directly from the Canon-written buffer UNCACHEABLE(raw_info.buffer)
+ *       (single-buffering; proven to hold a real movie-LV frame in docs/35's single-DNG capture).
+ *   0 = read from the redirected double buffer `frame` (capture_frames[]), which on D8 the LV EDMAC
+ *       redirect does NOT reliably fill (the sensor only writes raw_info.buffer).
+ * Default 1. Runtime A/B: `wr &rvx_src_from_raw_info 0`. Accepts single-buffer tearing to get a
+ * first decodable clip; double-buffering is a later refinement. */
+int rvx_src_from_raw_info = 1;
+
+/* [M50 II] Whether to redirect Canon's LV raw write-EDMAC to our own capture_frames buffer.
+ * Default 0 (OFF): with rvx_src_from_raw_info we read raw_info.buffer directly, and redirecting
+ * the channel (raw_lv_edmac->ram_addr @0xd0420200) fights Canon's lv_save_raw movie-raw job ->
+ * MvRawProDs/RawPro/LvJob null-context + interrupt storm. Runtime A/B: `wr &rvx_redirect_edmac 1`. */
+int rvx_redirect_edmac = 0;
+
 static struct msg_queue *event_q = NULL;
 
 // We post these events to the msg queue.  Since we push a pointer,
@@ -210,16 +225,25 @@ static void send_stop_command(void)
 // that is, if we want to give other code a chance to handle the event.
 static unsigned int raw_vid_keypress_cbr(unsigned int key)
 {
+    SEND_LOG_DATA_STR("keypress_cbr\n");
+    RVX_HEX("key", key);
     if (!is_movie_mode()) // in propvalues.c
+    {
+        SEND_LOG_DATA_STR("bail: not movie mode\n");
         return 1;
+    }
 
-    // keys are only hooked in LiveView
+    // [M50 II debug] idle-guard RELAXED: the serial handle_module_keys trigger must fire even when
+    // the ML console overlay makes liveview_display_idle() false. Log it, but do NOT bail.
     if (!liveview_display_idle())
-        return 1;
+        SEND_LOG_DATA_STR("warn: LV not idle (guard relaxed)\n");
 
     // if you somehow managed to start recording H.264, let it stop
     if (RECORDING_H264)
+    {
+        SEND_LOG_DATA_STR("bail: RECORDING_H264\n");
         return 1;
+    }
 
     // Fetch recording state when rec key pressed.
     // Theoretically this can change before we use it,
@@ -264,6 +288,11 @@ static unsigned int raw_vid_keypress_cbr(unsigned int key)
                 event->w = MLV_3_CROP_WIDTH;
                 event->h = MLV_3_CROP_HEIGHT;
                 msg_queue_post(event_q, (uint32_t)event);
+                SEND_LOG_DATA_STR("posted COMMAND_START\n");
+            }
+            else
+            {
+                SEND_LOG_DATA_STR("ERROR: no empty event for START\n");
             }
             // If we were trying to start recording and there was an earlier
             // error, we won't try to send the start signal.  Which is okay.
@@ -370,15 +399,16 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
     event = get_empty_event();
     if (event == NULL)
     {
-        // We have filled the queue.  This should mean the consumer is not keeping up.
-        // We have to stop.
-
-        // TODO classic MLV supports user choosing stop or skip frames,
-        // logic for skipping frames would go in here, perhaps some loop with a sleep,
-        // waiting for queue space to be available.
-        SEND_LOG_DATA_STR("All events are non-empty, stopping\n");
-
-        task_create("stop_com", WORKER_PRIO + 1, 0x800, send_stop_command, NULL);
+        // [M50 II] Queue full = the consumer (worker) can't keep up with LV fps -- the uncacheable
+        // sync crop-copy is slow (~2.8MB/frame). DO NOT stop here: on HW that made the stop cascade
+        // uncleanly -- with the queue full, COMMAND_STOP couldn't be posted, so the file never got a
+        // clean close (frames lost), and raw_lv_release's EvfDevState flood then wedged the cam.
+        // Instead DROP this frame (classic MLV's "skip frames"): the worker catches up, the queue
+        // drains, and the record continues at a lower effective fps until a clean stop is posted.
+        static int dropped_n = 0;
+        if ((dropped_n & 0x3F) == 0)   // rate-limited log (~every 64th drop)
+            SEND_LOG_DATA_STR("frame dropped (queue full, consumer behind)\n");
+        dropped_n++;
         return 0;
     }
 
@@ -397,9 +427,33 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
     event->size = frame_size;
 
     // Send prior captured data to worker for cropping
-    // and writing
-    if (frame != NULL)
+    // and writing.
+    // [M50 II] Prefer the Canon-written buffer directly (single-buffering); the D8 LV EDMAC
+    // redirect does not reliably fill the `frame` double buffer. See rvx_src_from_raw_info.
+    if (rvx_src_from_raw_info)
+        event->src = (char *)UNCACHEABLE(raw_info.buffer);
+    else if (frame != NULL)
         event->src = frame;
+
+    // [M50 II raw_vidx bring-up] geometry + capture-buffer sample, first few frames only.
+    {
+        static int ep_log_n = 0;
+        if (ep_log_n < 3)
+        {
+            RVX_HEX("rawinfo.w",     raw_info.width);
+            RVX_HEX("rawinfo.h",     raw_info.height);
+            RVX_HEX("rawinfo.pitch", raw_info.pitch);
+            RVX_HEX("rawinfo.buf",   (uint32_t)raw_info.buffer);
+            RVX_HEX("ev.src",        (uint32_t)event->src);
+            if (event->src != NULL)
+            {
+                volatile uint32_t *sp = (volatile uint32_t *)event->src;
+                RVX_HEX("src[0]", sp[0]);
+                RVX_HEX("src[1]", sp[1]);
+            }
+            ep_log_n++;
+        }
+    }
 
     // Swap buffer in use
     if (frame == capture_frames[0])
@@ -411,8 +465,15 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
         frame = capture_frames[0];
     }
 
-    // Make the next LV EDMAC capture go to updated buffer
-    if (frame != NULL)
+    // Make the next LV EDMAC capture go to updated buffer.
+    // [M50 II] DISABLED by default: with Change C we read raw_info.buffer directly, so we do NOT
+    // need the double buffer. Worse, raw_lv_redirect_edmac() writes raw_lv_edmac->ram_addr at
+    // 0xd0420200 -- the very channel Canon's lv_save_raw movie-raw job manages -- which hijacks it
+    // out from under Canon and triggers the intermittent Engine::MvRawProDs/RawPro/LvJob null-context
+    // + [kern] interrupt STORM that wedges the camera (HW: boots 203/209). Leaving Canon's channel
+    // alone lets its raw job run and keep filling raw_info.buffer, which is what we read.
+    // Runtime A/B: `wr &rvx_redirect_edmac 1`.
+    if (rvx_redirect_edmac && frame != NULL)
         raw_lv_redirect_edmac(frame);
 
     // Don't send request on first vsync, we've set up for EDMAC capture

@@ -106,12 +106,23 @@ hook_gui_funcs0_exclusivity(void)
 
 struct function_hook_patch normal_code_patches[] =
 {
-    {
-        .patch_addr = 0xe021e460,       // Canon keypress handler funcs[0] (Thumb)
-        .orig_content = {0x01, 0x46, 0x78, 0x48, 0x08, 0xb5, 0x83, 0x68},
-        .target_function_addr = (uint32_t)hook_gui_funcs0_exclusivity,
-        .description = "M50II: GUI input exclusivity (drop buttons while ML menu shown)"
-    },
+    /* [2026-07-19 BOOT-RELIABILITY] The GUI-input-exclusivity funcs[0] hook below is the ONLY
+     * normal code patch. Applying ANY code patch at boot runs mmu_reclaim_init1_page() +
+     * change_mmu_tables at big.4a2 -- an MMU-remap-vs-concurrent-FIO coherency race that faults
+     * (pc=0xE02F281A lr=0xE05BB769 dfar=0xE0997D80) and the [AB] abort handler then HANGS the boot,
+     * killing ~50% of cold boots (watchdog reset). The exclusivity feature is OFF by default
+     * (m50ii_exclusivity_on=0) AND known-broken (it blocks Canon per-mode input activation ->
+     * breaks Video/M menu nav, see comment above), so even when installed the hook runs
+     * TRANSPARENTLY (replay + continue = stock funcs[0]) -- installing it changes NOTHING except
+     * adding the racy boot-time MMU op. Empty patch set => COUNT()==0 => apply_normal_patches skips
+     * the whole reclaim/change_mmu_tables block => boot clears big.4 reliably, with zero behaviour
+     * change. Restore the entry (and set m50ii_exclusivity_on=1) if the exclusivity deep-fix resumes. */
+    // {
+    //     .patch_addr = 0xe021e460,       // Canon keypress handler funcs[0] (Thumb)
+    //     .orig_content = {0x01, 0x46, 0x78, 0x48, 0x08, 0xb5, 0x83, 0x68},
+    //     .target_function_addr = (uint32_t)hook_gui_funcs0_exclusivity,
+    //     .description = "M50II: GUI input exclusivity (drop buttons while ML menu shown)"
+    // },
 };
 
 #endif // M50 Mark II FW_VERSION 101

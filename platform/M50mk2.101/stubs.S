@@ -76,6 +76,19 @@ THUMB_FN(0xe00db9e6,  dump_file)                            // shouldn't be used
 /** Eventprocs (call by name) **/
 THUMB_FN(0xE05CBF82,  call)                                 /* [M50II 1.0.1 matched] eventproc-by-name executor: table load -> name lookup bl 0xE02EAF36 -> blx execute; verify */
 
+/** Network / WiFi socket lib (wifidep module — WiFi build-deploy; docs/37) **/
+/* Resolved by decompiled behavior on 1.0.1 — 200D addrs do NOT map here (their */
+/* set_IP_address is autofocus). Contiguous socket cluster e05fe9c0-e05fec80. */
+THUMB_FN(0xE05FE9C0,  socket_create)                        /* [M50II 1.0.1 OK] (domain,type,proto)->fd; DebugMsg line 0x2e; precedes socket_bind */
+THUMB_FN(0xE05FEA32,  socket_connect)                       /* [M50II 1.0.1 OK] (fd,sockaddr,len); convertfd->FUN_e03f750e; line 0x4e */
+THUMB_FN(0xE05FEADA,  socket_recv)                          /* [M50II 1.0.1 OK] (fd,buf,len,flags); convertfd->cmd6 reads response into buf */
+THUMB_FN(0xE05FEB60,  socket_send)                          /* [M50II 1.0.1 OK] (fd,buf,len,flags); convertfd->cmd8 dcache_clean(buf)=outgoing DMA */
+THUMB_FN(0xE03DB2FC,  socket_convertfd)                     /* [M50II 1.0.1 OK] (fd)->handle; indexes fd table DAT_e03ef4d4 (15 x 0x14) */
+THUMB_FN(0xE03DB356,  socket_close_caller)                  /* [M50II 1.0.1 OK] (handle) wraps transport close FUN_e03f779c; sock ops vtable slot1 (leaf alt 0xe03f779c) */
+THUMB_FN(0xE04256E8,  wlan_connect)                         /* [M50II 1.0.1 OK] STA/INFRA connect; copies 0xfc wlan_settings to *DAT_e0425ae8+0x3a4; uAP sibling 0xe0425a7c = DO NOT USE */
+THUMB_FN(0xE03CCBD0,  nif_setup)                            /* [M50II 1.0.1 OK] (interface); nif_up+nif_start; "[NW] nif_up err" */
+THUMB_FN(0xE03CCA10,  set_IP_address)                       /* [M50II 1.0.1 OK] (if,client_IP,subnet,gateway); default route iff gw!=0; "[NW] SetIPAddress OK" */
+
 /** GUI timers **/
 THUMB_FN(0xE0618BBE,  SetHPTimerNextTick)                   /* [M50II 1.0.1 OK] HPTimer cluster; sibling of SetHPTimerAfterNow */
 THUMB_FN(0xE0618B38,  SetHPTimerAfterNow)                   /* [M50II 1.0.1 OK] from error message; HPTimer cluster */

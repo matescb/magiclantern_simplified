@@ -1583,10 +1583,15 @@ int setup_buffers()
     /* discard old full-size buffers */
     fullsize_buffers[0] = fullsize_buffers[1] = 0;
 
-    if (fullres_buf_size > 20 * 1024 * 1024 - 1024 && !OUTPUT_COMPRESSION)
+    /* [M50 II, docs/32] Force single-buffering for uncompressed. On DIGIC 8 (M50 family) the
+     * double-buffering relies on raw_lv_redirect_edmac() steering the sensor EDMAC to
+     * fullsize_buffers[0] (a separate shoot alloc), but that redirect does NOT take effect on this
+     * body -- the sensor only ever writes raw_info.buffer, so fullsize_buffers[0] stays stale and
+     * the frame copy reads noise+black. Both buffers = the real sensor buffer instead. (Upstream
+     * already single-buffers for >20MB uncompressed; the code comment notes it is safe.) */
+    if (!OUTPUT_COMPRESSION)
     {
-        /* large buffers? assume single-buffering is safe for uncompressed output */
-        printf("Using single buffering (check with Show EDMAC).\n");
+        printf("Using single buffering (M50 II: D8 EDMAC redirect n/a).\n");
         fullsize_buffers[0] = UNCACHEABLE(raw_info.buffer);
     }
 
@@ -2696,12 +2701,25 @@ static void edmac_stop_spy()
 }
 
 
+/* [M50 II] slot whose async frame-copy is in flight. edmac_cbr_w publishes it as SLOT_FULL on
+ * real copy completion, so the writer never flushes a half-copied slot. -1 = none pending. */
+static volatile int edmac_pending_slot = -1;
+
 static void edmac_cbr_r(void *ctx)
 {
 }
 
 static void edmac_cbr_w(void *ctx)
 {
+    /* [M50 II] the copy is actually done now -> publish the slot to the writer here, NOT eagerly
+     * in compress_task. On cams where edmac_copy_rectangle_cbr_start completes synchronously this
+     * fires before compress_task continues, so the slot is already FULL by then. */
+    int s = edmac_pending_slot;
+    if (s >= 0)
+    {
+        slots[s].status = SLOT_FULL;
+        edmac_pending_slot = -1;
+    }
     edmac_active = 0;
     edmac_copy_rectangle_adv_cleanup();
 }
@@ -2827,6 +2845,10 @@ static void compress_task()
         }
         else
         {
+            /* [M50 II] async frame copy: remember which slot is being filled so edmac_cbr_w can
+             * publish it as SLOT_FULL on real completion (see below). Must be set BEFORE the copy
+             * call, since a synchronous copy path invokes cbr_w before returning. */
+            edmac_pending_slot = slot_index;
             edmac_active = 1;
             edmac_copy_rectangle_cbr_start(
                 (void*)out_ptr, fullSizeBuffer,
@@ -2836,9 +2858,14 @@ static void compress_task()
                 &edmac_cbr_r, &edmac_cbr_w, NULL
             );
         }
-        
-        /* mark it as completed */
-        slots[slot_index].status = SLOT_FULL;
+
+        /* mark it as completed.
+         * compression path is synchronous -> mark here. the async copy path (else, above) defers
+         * this to edmac_cbr_w on real completion, so the writer never sees a half-copied slot. */
+        if (OUTPUT_COMPRESSION)
+        {
+            slots[slot_index].status = SLOT_FULL;
+        }
     }
 }
 
