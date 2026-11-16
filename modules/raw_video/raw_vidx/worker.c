@@ -1158,6 +1158,13 @@ static void worker(void)
                     RVX_HEX("dropped (queue full)", rvx_dropped_queue);
                 }
                 RVX_HEX("dropped (bufs busy)", rvx_dropped_busy);
+                // [H1] the per-frame hook does not print; its error flags are reported here
+                if (rvx_hook_flags & 1)
+                    SEND_LOG_DATA_STR("ERROR: recording window does not fit the raw frame, stopped\n");
+                if (rvx_hook_flags)
+                    RVX_HEX("hook flags", rvx_hook_flags);
+                if (rvx_dropped_nobuf)
+                    RVX_HEX("skipped (capture buffers not ready)", rvx_dropped_nobuf);
                 if (rvx_dropped_nofile)
                     RVX_HEX("discarded (file not writable)", rvx_dropped_nofile);
                 if (rvx_dropped_copy)
@@ -1175,7 +1182,19 @@ static void worker(void)
             // captured no frames and produced a header-only file.
             // By now every IMAGE_DATA event queued ahead of this stop has been consumed.
             // Done for every stop command, also one that arrived while not recording.
+            // [H1] The capture buffers (non-default toggles only) are freed here, in the worker,
+            // not in the vsync hook.  recording_state is not ACTIVE at this point unless the stop
+            // was refused, so the hook does not use them.
+            if (recording_state != ACTIVE)
+                rvx_capture_free();
             allow_recording();
+            break;
+
+        case CAPTURE_PREP:
+            // [H1] The vsync hook needs the two capture buffers (rvx_src_from_raw_info = 0 or
+            // rvx_redirect_edmac = 1) and may not call the allocator itself.
+            if (recording_state == ACTIVE)
+                rvx_capture_alloc();
             break;
 
         case EMPTY:

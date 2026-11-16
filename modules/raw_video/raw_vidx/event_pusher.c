@@ -93,13 +93,23 @@ static struct msg_queue *event_q = NULL;
 // We post these events to the msg queue.  Since we push a pointer,
 // we need some storage that will live until the msg has been consumed.
 //
-// Don't access these events directly, only use get_event() / release_event().
-// This handles the sem to avoid races.
 // Only the worker receives events; single consumer reduces code complexity.
-// The worker releases every event it received.  The producer releases only events it
-// took but never posted (first vsync of a session, rejected post), which nobody else
-// can hold.
-static struct raw_vid_event events[RAW_VID_Q_LEN] = {0};
+// The worker releases every event it received (release_event() only writes .type = EMPTY).
+//
+// [M50 II, H1] Two pools, because the two kinds of producer have different rules:
+//  - frame_events[]: IMAGE_DATA only, taken ONLY by rvx_frame_tick() (one producer at a time:
+//    Canon's EvfDev task for sync source 0, the "rvx_sync" task for sources 1 / 2).  Taken
+//    without any lock, so the per-frame hook never waits: one producer scans, the consumer only
+//    ever writes EMPTY, and a slot freed during the scan is at worst missed for one frame.
+//  - cmd_events[]: COMMAND_START / COMMAND_STOP from the key handler and the "stop_com" task,
+//    guarded by events_sem with a timed take.  Never used from the per-frame hook.
+//  - hook_stop_event / hook_prep_event: one reserved slot each, so the hook can ask for a stop
+//    or for the capture buffers with a single non-blocking msg_queue_post().
+#define RVX_CMD_EVENTS 4
+static struct raw_vid_event frame_events[RAW_VID_Q_LEN] = {0};
+static struct raw_vid_event cmd_events[RVX_CMD_EVENTS] = {0};
+static struct raw_vid_event hook_stop_event = {0};
+static struct raw_vid_event hook_prep_event = {0};
 static struct semaphore *events_sem = NULL;
 
 // Local var to rapidly stop pushing image data to worker.
@@ -114,12 +124,113 @@ static int prevent_recording = 1;
 // is the first frame of a new session, whatever its frame counter says.
 static int session_reset_pending = 0;
 
+/* [H1] What the per-frame hook could not say over UART (it must not print).  Bits, sticky until
+ * the next session captures its first frame; the worker prints the word at stop.
+ *   1 = recording window does not fit the raw frame (stop requested)
+ *   2 = a stop request from the hook found the queue full and was retried on a later vsync
+ *   4 = capture buffers were requested from the worker (non-default toggles only)
+ * Read-only telemetry: `rd &rvx_hook_flags`. */
+volatile int rvx_hook_flags = 0;
+/* [H1] Frames skipped because the capture buffers were not allocated yet (non-default toggles
+ * rvx_src_from_raw_info = 0 or rvx_redirect_edmac = 1 only; always 0 with the defaults). */
+int rvx_dropped_nobuf = 0;
+
 static void send_stop_command(void); // forward declaration
 
-// Returns a raw_vid_event in the PREPARING state,
-// or returns NULL if all events are in use.
-// That should only happen if the worker cannot service our requests fast enough,
-// probably because we can't save to card fast enough.
+// The two full-frame capture buffers.  Allocated and freed by the worker task only
+// (rvx_capture_alloc / rvx_capture_free); the hook only reads the pointers once cap_ready is set.
+static char *capture_frames[2] = {NULL};
+static volatile int cap_ready = 0;
+static volatile int hook_stop_wanted = 0;
+
+// [H1] Frame-event slot for the per-frame hook: no semaphore, no wait, no log.
+// NULL = every slot is still owned by the worker (it is behind); the caller drops the frame.
+static struct raw_vid_event * FAST get_frame_event(void)
+{
+    static size_t last_index = 0;
+    for (int n = 0; n < RAW_VID_Q_LEN; n++)
+    {
+        last_index = (last_index + 1 < RAW_VID_Q_LEN) ? last_index + 1 : 0;
+        struct raw_vid_event *event = &frame_events[last_index];
+        if (event->type == EMPTY)
+        {
+            memset(event, 0, sizeof(*event));
+            event->type = PREPARING;
+            return event;
+        }
+    }
+    return NULL;
+}
+
+// [H1] Post one of the reserved events from the hook.  Non-blocking: msg_queue_post() returns
+// an error when the queue is full, and then the slot is handed back for a later try.
+// Returns 0 when the event is queued or already on its way.
+static int FAST hook_post(struct raw_vid_event *event, enum event_type type)
+{
+    if (event->type != EMPTY)
+        return 0; // still queued or being handled by the worker
+    event->creation_time = get_ms_clock();
+    event->type = type;
+    if (msg_queue_post(event_q, (uint32_t)event))
+    {
+        event->type = EMPTY;
+        return 1;
+    }
+    return 0;
+}
+
+// [H1] Stop request from the hook: stop queueing at once, tell the worker without waiting.
+// If the queue is full the request is repeated from the following vsyncs.
+static void FAST hook_request_stop(void)
+{
+    prevent_recording = 1;
+    hook_stop_wanted = 1;
+    if (hook_post(&hook_stop_event, COMMAND_STOP) == 0)
+        hook_stop_wanted = 0;
+    else
+        rvx_hook_flags |= 2;
+}
+
+// Worker task only.  Handles CAPTURE_PREP: allocate the two capture buffers the hook asked for.
+void rvx_capture_alloc(void)
+{
+    if (cap_ready)
+        return;
+    if (raw_info.width == 0 || raw_info.height == 0)
+        return; // the hook asks again
+    // We lie a little to increase height, we want to slightly over-allocate.
+    // Old code does this, not quite sure why, perhaps DMA block size related?
+    const uint32_t lv_raw_size = raw_info.width * (raw_info.height + 2) * BPP/8;
+    rvx_capture_free(); // leftovers of an earlier session, possibly of another size
+    capture_frames[0] = fio_malloc(lv_raw_size);
+    capture_frames[1] = capture_frames[0] ? fio_malloc(lv_raw_size) : NULL;
+    if (capture_frames[1] == NULL)
+    {
+        SEND_LOG_DATA_STR("Could not alloc capture_frames\n");
+        rvx_capture_free();
+        // This is likely unrecoverable, stop recording
+        rvx_request_stop();
+        return;
+    }
+    cap_ready = 1;
+}
+
+// Worker task only, when no session is active (start of the next one, or after a stop).
+void rvx_capture_free(void)
+{
+    cap_ready = 0;
+    for (int i = 0; i < 2; i++)
+    {
+        if (capture_frames[i] != NULL)
+        {
+            fio_free(capture_frames[i]);
+            capture_frames[i] = NULL;
+        }
+    }
+}
+
+// Returns a raw_vid_event in the PREPARING state for a COMMAND, or NULL if all are in use.
+// NOT for the per-frame hook (it waits on a semaphore): key handler and "stop_com" task only.
 //
 // We use a static array of events, and .type == EMPTY to signify
 // if the event can be re-used.  Therefore, caller must never set type
@@ -132,7 +243,6 @@ static void send_stop_command(void); // forward declaration
 // (which it will do with release_event()).
 struct raw_vid_event *get_empty_event(void)
 {
-    static size_t last_index = 0;
     struct raw_vid_event *event = NULL;
 
     int err = take_semaphore(events_sem, 2000);
@@ -143,29 +253,12 @@ struct raw_vid_event *get_empty_event(void)
         return NULL;
     }
 
-    // This is an optimisation; we test the event after the last one
-    // we assigned.  Most of the time usage should be sequential.
-    if (last_index < RAW_VID_Q_LEN - 1)
-        last_index++;
-    else
-        last_index = 0;
-
-    if (events[last_index].type == EMPTY)
+    for (int i = 0; i < RVX_CMD_EVENTS; i++)
     {
-        event = &events[last_index];
-    }
-    else
-    {
-        // simple linear search, it's a small contiguous array
-        int i = 0;
-        while (i < RAW_VID_Q_LEN)
+        if (cmd_events[i].type == EMPTY)
         {
-            if (events[i].type == EMPTY)
-            {
-                event = &events[i];
-                break;
-            }
-            i++;
+            event = &cmd_events[i];
+            break;
         }
     }
 
@@ -370,6 +463,17 @@ static unsigned int raw_vid_keypress_cbr(unsigned int key)
 // In any case, it works to get 60fps captures on 200D.
 // [M50 II] The per-frame work.  Called from the core's vsync callback (rvx_sync_src = 0, in
 // Canon's EvfDev task) or from the "rvx_sync" task (sources 1 and 2, see rvx_sync.c).
+//
+// [H1] This runs in Canon's context for the default source, so it must not wait, allocate,
+// free, create a task or print.  Everything it calls:
+//   get_recording_state()      worker.c, returns a variable
+//   get_frame_event()          above; bounded scan of 20 slots + memset of one event
+//   get_ms_clock/get_us_clock  core; cli + timer register read + sei
+//   msg_queue_post()           0xE05B55EE, the non-blocking post (error when the queue is full)
+//   release_event()            one store
+//   raw_lv_redirect_edmac()    only with rvx_redirect_edmac = 1 (default 0); one register store
+// Errors are counted (rvx_dropped_queue, rvx_dropped_nobuf, rvx_hook_flags) and printed by the
+// worker at stop.
 unsigned int FAST rvx_frame_tick(void)
 {
     static int count = 0; // frame count, reset every recording session
@@ -391,7 +495,6 @@ unsigned int FAST rvx_frame_tick(void)
     // We message worker.c with the details of this captured frame.
     // It optionally crops out a region of interest, and saves to disk.
 
-    static char *capture_frames[2] = {NULL};
     static char *frame = NULL; // current capture_frame in use
 
     if (get_recording_state() != ACTIVE || prevent_recording)
@@ -399,22 +502,10 @@ unsigned int FAST rvx_frame_tick(void)
         // Either no recording, or the consumer still thinks recording is active but
         // something on this, the producer side, has requested stop (the recording has
         // very recently stopped; consumer will re-enable recording when it is ready).
-        // Reset session.
-        //
-        // The buffers used to be freed only in the second case.  If the worker went
-        // INACTIVE between two vsyncs that case was never seen, and both capture
-        // buffers (about 2 x 4.3 MB) stayed allocated until the next recording.
+        // Reset session.  The capture buffers are freed by the worker (rvx_capture_free).
         count = 0;
-        if (capture_frames[0] != NULL)
-        {
-            fio_free(capture_frames[0]);
-            capture_frames[0] = NULL;
-        }
-        if (capture_frames[1] != NULL)
-        {
-            fio_free(capture_frames[1]);
-            capture_frames[1] = NULL;
-        }
+        if (hook_stop_wanted && hook_post(&hook_stop_event, COMMAND_STOP) == 0)
+            hook_stop_wanted = 0; // a stop request that found the queue full, repeated
         return 0;
     }
 
@@ -435,78 +526,47 @@ unsigned int FAST rvx_frame_tick(void)
         return 0;
     }
 
+    // [M50 II] The two full-frame capture buffers (2 x 4.3 MB) are only used when frames are
+    // not read from raw_info.buffer or when the EDMAC redirect is on.  With the defaults
+    // neither is the case and nothing is allocated (A8).  [H1] When they are needed the worker
+    // allocates them: ask it with a non-blocking post and skip frames until they are there.
+    const int need_bufs = (!rvx_src_from_raw_info || rvx_redirect_edmac);
+    if (need_bufs && !cap_ready)
+    {
+        if (count == 0)
+        {
+            rvx_hook_flags |= 4;
+            hook_post(&hook_prep_event, CAPTURE_PREP); // full queue: asked again next vsync
+            rvx_dropped_nobuf++;
+            return 0;
+        }
+        // The buffers went away in the middle of a session.  Not expected.
+        hook_request_stop();
+        return 0;
+    }
+
     count++;
     if (count == 1)
     { // per recording-session setup
-        SEND_LOG_DATA_STR("Video starting.\n");
         rvx_dropped_queue = 0;
         rvx_vsyncs = 0;
+        rvx_hook_flags &= 4;
 
         // The window must lie inside the raw frame, or the worker would copy from beyond
         // Canon's buffer.  (x is rounded up to 8, as the worker does.)
         if (((sess_x + 7) & ~7u) + sess_w > (uint32_t)raw_info.width
             || sess_y + sess_h > (uint32_t)raw_info.height)
         {
-            SEND_LOG_DATA_STR("ERROR: recording window does not fit the raw frame, stopping\n");
-            prevent_recording = 1; // at once; the stop task below only runs later
-            task_create("stop_com", WORKER_PRIO + 1, 0x800, send_stop_command, NULL);
+            rvx_hook_flags |= 1; // the worker prints it at stop
+            hook_request_stop(); // sets prevent_recording at once
             return 0;
         }
+        // a pointer left from an earlier session is stale
+        frame = need_bufs ? capture_frames[0] : NULL;
     }
     rvx_vsyncs++;
 
-    // [M50 II] The two full-frame capture buffers (2 x 4.3 MB) are only used when frames are
-    // not read from raw_info.buffer or when the EDMAC redirect is on.  With the defaults
-    // neither is the case, so do not take 8.5 MB out of the pool Canon's LiveView shares (A8),
-    // and do not call the allocator from the vsync hook, when nothing will use the memory.
-    if (count == 1 && (!rvx_src_from_raw_info || rvx_redirect_edmac))
-    {
-
-        // We lie a little to increase height, we want to slightly over-allocate.
-        // Old code does this, not quite sure why, perhaps DMA block size related?
-        const uint32_t lv_raw_size = raw_info.width * (raw_info.height + 2) * BPP/8;
-        // Free leftovers of a session whose stop we never observed (see above),
-        // so they are not leaked and the size matches the current raw_info.
-        if (capture_frames[0] != NULL)
-        {
-            fio_free(capture_frames[0]);
-            capture_frames[0] = NULL;
-        }
-        if (capture_frames[1] != NULL)
-        {
-            fio_free(capture_frames[1]);
-            capture_frames[1] = NULL;
-        }
-        capture_frames[0] = fio_malloc(lv_raw_size);
-
-        if (capture_frames[0] == NULL)
-        {
-            SEND_LOG_DATA_STR("Could not alloc capture_frames[0]\n");
-
-            // This is likely unrecoverable, stop recording
-            task_create("stop_com", WORKER_PRIO + 1, 0x800, send_stop_command, NULL);
-            return 0;
-        }
-        capture_frames[1] = fio_malloc(lv_raw_size);
-        if (capture_frames[1] == NULL)
-        {
-            SEND_LOG_DATA_STR("Could not alloc capture_frames[1]\n");
-            fio_free(capture_frames[0]);
-            capture_frames[0] = NULL;
-
-            // This is likely unrecoverable, stop recording
-            task_create("stop_com", WORKER_PRIO + 1, 0x800, send_stop_command, NULL);
-            return 0;
-        }
-
-        frame = capture_frames[0];
-    }
-    else if (count == 1)
-    {
-        frame = NULL; // nothing allocated; a pointer left from an earlier session is stale
-    }
-
-    event = get_empty_event();
+    event = get_frame_event();
     if (event == NULL)
     {
         // [M50 II] Queue full = the consumer (worker) can't keep up with LV fps -- the uncacheable
@@ -515,8 +575,7 @@ unsigned int FAST rvx_frame_tick(void)
         // clean close (frames lost), and raw_lv_release's EvfDevState flood then wedged the cam.
         // Instead DROP this frame (classic MLV's "skip frames"): the worker catches up, the queue
         // drains, and the record continues at a lower effective fps until a clean stop is posted.
-        if ((rvx_dropped_queue & 0x3F) == 0)   // rate-limited log (~every 64th drop)
-            SEND_LOG_DATA_STR("frame dropped (queue full, consumer behind)\n");
+        // Counted only; the worker prints the total at stop.
         rvx_dropped_queue++;
         return 0;
     }
@@ -545,26 +604,6 @@ unsigned int FAST rvx_frame_tick(void)
     else if (frame != NULL)
         event->src = frame;
 
-    // [M50 II raw_vidx bring-up] geometry + capture-buffer sample, first few frames only.
-    {
-        static int ep_log_n = 0;
-        if (ep_log_n < 3)
-        {
-            RVX_HEX("rawinfo.w",     raw_info.width);
-            RVX_HEX("rawinfo.h",     raw_info.height);
-            RVX_HEX("rawinfo.pitch", raw_info.pitch);
-            RVX_HEX("rawinfo.buf",   (uint32_t)raw_info.buffer);
-            RVX_HEX("ev.src",        (uint32_t)event->src);
-            if (event->src != NULL)
-            {
-                volatile uint32_t *sp = (volatile uint32_t *)event->src;
-                RVX_HEX("src[0]", sp[0]);
-                RVX_HEX("src[1]", sp[1]);
-            }
-            ep_log_n++;
-        }
-    }
-
     // Swap buffer in use
     if (frame == capture_frames[0])
     {
@@ -583,7 +622,7 @@ unsigned int FAST rvx_frame_tick(void)
     // + [kern] interrupt STORM that wedges the camera (HW: boots 203/209). Leaving Canon's channel
     // alone lets its raw job run and keep filling raw_info.buffer, which is what we read.
     // Runtime A/B: `wr &rvx_redirect_edmac 1`.
-    if (rvx_redirect_edmac && frame != NULL)
+    if (rvx_redirect_edmac && need_bufs && frame != NULL)
         raw_lv_redirect_edmac(frame);
 
     // Don't send request on first vsync, we've set up for EDMAC capture
@@ -598,8 +637,6 @@ unsigned int FAST rvx_frame_tick(void)
             // recording.  The event was never queued, so the worker will not release
             // it; we must, or the slot leaks.
             release_event(event);
-            if ((rvx_dropped_queue & 0x3F) == 0)
-                SEND_LOG_DATA_STR("frame dropped (queue post failed)\n");
             rvx_dropped_queue++;
         }
     }
@@ -610,8 +647,6 @@ unsigned int FAST rvx_frame_tick(void)
         // or it stays PREPARING forever and the pool shrinks by one per session.
         release_event(event);
     }
-
-//ASSERT(frame_size_uncompressed % 4 == 0);
 
     return 0;
 }

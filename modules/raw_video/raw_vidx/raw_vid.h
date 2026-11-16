@@ -42,6 +42,9 @@ enum event_type
 
     // This event must set valid values for all fields.
     IMAGE_DATA, // Some image data to save to file.
+    // [H1] From the per-frame hook, which may not allocate: the worker shall allocate the
+    // capture buffers (rvx_capture_alloc).  Only creation_time and type are set.
+    CAPTURE_PREP,
 };
 
 struct raw_vid_event
