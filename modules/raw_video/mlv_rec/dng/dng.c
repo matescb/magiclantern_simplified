@@ -600,7 +600,14 @@ static void dng_fill_header(struct frame_info * frame_info, struct dng_data * dn
         
         /* White balance stuff */
         int32_t wbal[6];
-        get_white_balance(frame_info->wbal_hdr, wbal, &camera_id[current_cam]);
+        camera_id_t wb_cam = camera_id[current_cam];
+        if(wb_cam.cameraModel == 0 && frame_info->rawi_hdr.raw_info.color_matrix1[1] != 0)
+        {
+            /* camera not in database: derive Kelvin multipliers from the matrix the camera wrote into RAWI
+               instead of the all-zero placeholder entry (which gave AsShotNeutral = 1000000/2147483648) */
+            memcpy(wb_cam.ColorMatrix2, frame_info->rawi_hdr.raw_info.color_matrix1, sizeof(wb_cam.ColorMatrix2));
+        }
+        get_white_balance(frame_info->wbal_hdr, wbal, &wb_cam);
 
         /* tcReelName */
         #ifdef _WIN32
