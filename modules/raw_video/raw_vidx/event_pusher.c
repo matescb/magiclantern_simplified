@@ -342,16 +342,16 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
     static char *capture_frames[2] = {NULL};
     static char *frame = NULL; // current capture_frame in use
 
-    if (get_recording_state() != ACTIVE)
-        return 0;
-
-    if (prevent_recording)
+    if (get_recording_state() != ACTIVE || prevent_recording)
     {
-        // Consumer thinks recording is active, but something on this,
-        // the producer side, has requested stop.  This should mean the recording
-        // has very recently stopped.  Reset session.
+        // Either no recording, or the consumer still thinks recording is active but
+        // something on this, the producer side, has requested stop (the recording has
+        // very recently stopped; consumer will re-enable recording when it is ready).
+        // Reset session.
         //
-        // Consumer will re-enable recording when it is ready.
+        // The buffers used to be freed only in the second case.  If the worker went
+        // INACTIVE between two vsyncs that case was never seen, and both capture
+        // buffers (about 2 x 4.3 MB) stayed allocated until the next recording.
         count = 0;
         if (capture_frames[0] != NULL)
         {
