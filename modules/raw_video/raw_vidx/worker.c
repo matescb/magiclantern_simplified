@@ -147,6 +147,21 @@ static void alloc_crop_bufs(struct crop_buf crop_bufs[])
     crop_bufs[1].end = crop_bufs[1].start + buf_size;
 }
 
+// Returns both crop buffers to the allocator and clears the structs,
+// so alloc_crop_bufs() can be used again.
+static void free_crop_bufs(struct crop_buf crop_bufs[])
+{
+    for (int i = 0; i < 2; i++)
+    {
+        if (crop_bufs[i]._buf != NULL)
+            fio_free(crop_bufs[i]._buf);
+        crop_bufs[i]._buf = NULL;
+        crop_bufs[i].start = NULL;
+        crop_bufs[i].cur = NULL;
+        crop_bufs[i].end = NULL;
+    }
+}
+
 // Old DryOS used to trigger this, new DryOS
 // seems to only trigger the write complete cbr.
 static void edmac_cbr_r(void *unused_ctx)
@@ -534,51 +549,70 @@ static void worker(void)
                 // touches no EDMAC channel or completion-CBR table (and the core at this revision
                 // has no CBR "seed" helper to call).
 
-                // Get new save file
+                // Get new save file, start the MLV session, write the file headers.
+                //
+                // By this point we hold two large crop buffers and one raw_lv_request().
+                // If anything below fails we must give all of that back: recording_state
+                // stays INACTIVE, so COMMAND_STOP would never do it for us, and a leftover
+                // non-NULL crop_buf makes every later COMMAND_START bail out.
+                const char *start_err = NULL;
+                int file_opened = 0;
+                int mlv_started = 0;
+
                 if (raw_vid_fp != NULL)
                 {
-                    SEND_LOG_DATA_STR("ERROR: Worker tried to init save file but already in use\n");
-                    break;
+                    start_err = "ERROR: Worker tried to init save file but already in use\n";
                 }
-
-                if (get_numbered_file_name("tst%02d.mlv", 99, mlv_name, sizeof(mlv_name)) > -1)
+                else if (get_numbered_file_name("tst%02d.mlv", 99, mlv_name, sizeof(mlv_name)) < 0)
                 {
-                    raw_vid_fp = FIO_CreateFile(mlv_name);
-                    if (raw_vid_fp == NULL)
-                    {
-                        SEND_LOG_DATA_STR("Worker couldn't create mlv file\n");
-                        break;
-                    }
+                    start_err = "ERROR: Worker couldn't get mlv file name\n";
+                }
+                else if ((raw_vid_fp = FIO_CreateFile(mlv_name)) == NULL)
+                {
+                    start_err = "Worker couldn't create mlv file\n";
                 }
                 else
                 {
-                    SEND_LOG_DATA_STR("ERROR: Worker couldn't get mlv file name\n");
-                    break;
+                    file_opened = 1;
+
+                    session.fps = fps_get_current_x1000();
+                    session.res_x = event->w;
+                    session.res_y = event->h;
+
+                    if (start_mlv_session(&session))
+                    {
+                        start_err = "ERROR: failed to start mlv session\n";
+                    }
+                    else
+                    {
+                        mlv_started = 1;
+
+                        // write standard header blocks
+                        header_size = write_file_headers(header_buf, header_buf + header_buf_size);
+                        if (header_size == 0)
+                            start_err = "ERROR: failed to write mlv headers\n";
+                        else if (FIO_WriteFile(raw_vid_fp, header_buf, header_size) != (int)header_size)
+                            start_err = "ERROR: short write of mlv headers to card\n";
+                    }
                 }
 
-                // FIXME from here onwards we want to cleanup the file if we error.
-                // Really, we need to revisit error conditions in all states,
-                // and ensure we handle correctly (e.g. flushing pending data).
-
-                session.fps = fps_get_current_x1000();
-                session.res_x = event->w;
-                session.res_y = event->h;
-
-                err = start_mlv_session(&session);
-                if (err)
+                if (start_err != NULL)
                 {
-                    SEND_LOG_DATA_STR("ERROR: failed to start mlv session\n");
+                    SEND_LOG_DATA_STR(start_err);
+                    SEND_LOG_DATA_STR("worker: start failed, releasing file, raw mode and buffers\n");
+                    if (file_opened)
+                    {
+                        // The (empty or header-only) file is closed, not deleted.
+                        FIO_CloseFile(raw_vid_fp);
+                        raw_vid_fp = NULL;
+                    }
+                    if (mlv_started)
+                        stop_mlv_session();
+                    raw_lv_release(); // pairs with the raw_lv_request() above
+                    crop_buf = NULL;
+                    free_crop_bufs(crop_bufs);
                     break;
                 }
-
-                // write standard header blocks
-                header_size = write_file_headers(header_buf, header_buf + header_buf_size);
-                if (header_size == 0)
-                {
-                    SEND_LOG_DATA_STR("ERROR: failed to write mlv headers\n");
-                    break;
-                }
-                FIO_WriteFile(raw_vid_fp, header_buf, header_size);
 
                 #ifdef RAW_VID_LOG
                 send_log_data_str("Recording is active\n");
@@ -631,22 +665,7 @@ static void worker(void)
 
                 // free crop buffers
                 crop_buf = NULL;
-                if (crop_bufs[0]._buf != NULL)
-                {
-                    fio_free(crop_bufs[0]._buf);
-                    crop_bufs[0]._buf = NULL;
-                    crop_bufs[0].start = NULL;
-                    crop_bufs[0].cur = NULL;
-                    crop_bufs[0].end = NULL;
-                }
-                if (crop_bufs[1]._buf != NULL)
-                {
-                    fio_free(crop_bufs[1]._buf);
-                    crop_bufs[1]._buf = NULL;
-                    crop_bufs[1].start = NULL;
-                    crop_bufs[1].cur = NULL;
-                    crop_bufs[1].end = NULL;
-                }
+                free_crop_bufs(crop_bufs);
 
                 extern int rvx_dropped_queue; // event_pusher.c
                 RVX_HEX("frames accepted", video_frame_count);
