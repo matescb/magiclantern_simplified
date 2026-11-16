@@ -488,6 +488,13 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
             task_create("stop_com", WORKER_PRIO + 1, 0x800, send_stop_command, NULL);
         }
     }
+    else
+    {
+        // The event taken above is deliberately not posted on the first vsync.
+        // Nobody else will ever see it, so we must hand the slot back ourselves,
+        // or it stays PREPARING forever and the pool shrinks by one per session.
+        release_event(event);
+    }
 
 //ASSERT(frame_size_uncompressed % 4 == 0);
 
