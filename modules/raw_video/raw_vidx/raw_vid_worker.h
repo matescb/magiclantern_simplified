@@ -22,6 +22,13 @@ enum recording_state get_recording_state(void);
 // Drop the write task well below Canon's LV tasks (~0x0-0x13) so EvfDev keeps draining mid-write.
 #define WORKER_WRITE_PRIO 0x1A
 
+// How long COMMAND_STOP waits for one buffer write to card to finish before it gives
+// up on the buffered frames.  A full 16 MB buffer at a slow 5 MB/s is about 3 s.
+#define STOP_WRITE_WAIT_MS 10000
+// How long a frame may wait for the previous "raw_write" task to exit before its
+// buffer flush is skipped.  The task is past its FIO_WriteFile() by then.
+#define FLUSH_WRITE_WAIT_MS 1000
+
 // Used to get space for our local buffers.  This is the initial
 // size attempted, we reduce from their until success.
 // Pick a nice round value; this is the aligned size, not underlying size.

@@ -16,6 +16,18 @@ static FILE *raw_vid_fp = NULL;
 // ensures we never attempt an edmac copy while the last is in progress
 static struct semaphore *edmac_sem = NULL;
 
+// Serialises use of raw_vid_fp between the worker and the "raw_write" task.
+// The worker takes it before handing a full buffer to a "raw_write" task; that task
+// gives it back when its FIO_WriteFile() has returned and the buffer is marked empty.
+// So whoever holds it knows no card write is in flight, which is what COMMAND_STOP
+// needs before it flushes the remaining data and closes the file.
+static struct semaphore *write_sem = NULL;
+
+// Frames whose complete VIDF block has been written to the file in this session.
+// Only changed by whoever holds write_sem.  This, not the number of frames
+// accepted into the buffers, is what goes into the MLV file header.
+static uint32_t frames_on_disk = 0;
+
 static enum recording_state recording_state = INACTIVE;
 
 /* [M50 II] Poll Canon's async raw-job "ready" flags after raw_lv_request() before consuming frames,
@@ -54,6 +66,7 @@ struct crop_buf
     char *start; // Start of aligned buf, for DMA ops, etc.
     char *cur; // Position that data should write to.
     char *end; // Do not write to this location or later.
+    uint32_t frames; // Number of complete VIDF blocks between start and cur.
 };
 
 // Finds two large, aligned blocks, of equal size,
@@ -159,6 +172,7 @@ static void free_crop_bufs(struct crop_buf crop_bufs[])
         crop_bufs[i].start = NULL;
         crop_bufs[i].cur = NULL;
         crop_bufs[i].end = NULL;
+        crop_bufs[i].frames = 0;
     }
 }
 
@@ -178,7 +192,9 @@ static void edmac_cbr_w(void *unused_ctx)
     give_semaphore(edmac_sem); // signal edmac copy rect as safe to use
 }
 
-static void write_buf_to_disk(struct crop_buf *crop_buf)
+// Writes the used part of crop_buf to the file, then marks the buffer empty.
+// Synchronous.  Caller must hold write_sem.
+static void write_buf(struct crop_buf *crop_buf)
 {
     #ifdef RAW_VID_LOG
     uint32_t buf_size = 100;
@@ -199,26 +215,40 @@ static void write_buf_to_disk(struct crop_buf *crop_buf)
         SEND_LOG_DATA_STR("ERROR: some buf member for disk write was NULL\n");
         return;
     }
-    
-    // FIXME we probably want a sem to remove the potential
-    // for COMMAND_STOP to close this handle before we start
-    // the write.
+
+    // COMMAND_STOP cannot close this handle under us: it takes write_sem,
+    // which our caller holds, before touching the file.
     if (raw_vid_fp == NULL)
     {
         SEND_LOG_DATA_STR("ERROR: raw_vid_fp was NULL before write\n");
         return;
     }
 
+    uint32_t size = crop_buf->cur - crop_buf->start;
+    if (size == 0)
+        return;
+
     #ifdef RAW_VID_LOG
     uint32_t start_time = get_ms_clock();
     #endif
     SEND_LOG_DATA_STR("worker: writing crop_buf -> card\n");
-    RVX_HEX("wbytes", (uint32_t)(crop_buf->cur - crop_buf->start));
-    FIO_WriteFile(raw_vid_fp, crop_buf->start, crop_buf->cur - crop_buf->start);
+    RVX_HEX("wbytes", size);
+    int written = FIO_WriteFile(raw_vid_fp, crop_buf->start, size);
     SEND_LOG_DATA_STR("worker: FIO_WriteFile done\n");
+    if (written == (int)size)
+    {
+        frames_on_disk += crop_buf->frames;
+    }
+    else
+    {
+        // Card full or write error.  These frames are not counted, so the header
+        // frame count stays within what is really in the file.
+        SEND_LOG_DATA_STR("ERROR: short card write, frames in this buffer lost\n");
+        RVX_HEX("written", written);
+    }
     #ifdef RAW_VID_LOG
     uint32_t end_time = get_ms_clock();
-    uint32_t data_rate_x100 = (uint32_t)((float)(crop_buf->cur - crop_buf->start) / 1024 / 1024
+    uint32_t data_rate_x100 = (uint32_t)((float)size / 1024 / 1024
                               * 1000 * 100 / (end_time - start_time));
 
 // FIXME this sometimes lags out and we stall.  I can think of two obvious things to try.
@@ -232,7 +262,30 @@ static void write_buf_to_disk(struct crop_buf *crop_buf)
     #endif
 
     // reset buf so it's good to use again
+    crop_buf->frames = 0;
     crop_buf->cur = crop_buf->start;
+}
+
+// Entry point of the "raw_write" task.  The worker took write_sem on our behalf
+// before creating the task; we give it back when the write is finished.
+static void write_buf_task(struct crop_buf *crop_buf)
+{
+    write_buf(crop_buf);
+    give_semaphore(write_sem);
+}
+
+// For COMMAND_STOP: write out whatever is in crop_buf and wait for it.
+// The write runs in a "raw_write" task like every other buffer flush, so large card
+// writes always happen at WORKER_WRITE_PRIO (see raw_vid_worker.h for why that matters).
+// Caller must hold write_sem.  Returns 0 with write_sem held again; non-zero if the
+// write did not finish in time, in which case write_sem is NOT held.
+static int flush_buf_and_wait(struct crop_buf *crop_buf)
+{
+    if (crop_buf->start == NULL || crop_buf->cur == crop_buf->start)
+        return 0; // nothing to write
+
+    task_create("raw_write", WORKER_WRITE_PRIO, 0x800, write_buf_task, crop_buf);
+    return take_semaphore(write_sem, STOP_WRITE_WAIT_MS);
 }
 
 // This is the heart of worker.c.
@@ -380,6 +433,7 @@ static void worker(void)
             session_data_size += (dst - crop_buf->cur + event->size);
             #endif
             crop_buf->cur = dst + event->size; // cur after image data, which is not yet written
+            crop_buf->frames++;
             video_frame_count++;
 
             err = take_semaphore_now(edmac_sem);
@@ -401,8 +455,19 @@ static void worker(void)
             // as we have edmac_sem, so we can safely flush if one of the buffers was full.
             if (flush_src != NULL)
             {
-                task_create("raw_write", WORKER_WRITE_PRIO, 0x800,
-                            write_buf_to_disk, flush_src);
+                // The previous "raw_write" task, if any, has already emptied its buffer
+                // (or we would not have been able to swap to it), so at worst it is a
+                // few instructions away from giving write_sem back.
+                if (take_semaphore(write_sem, FLUSH_WRITE_WAIT_MS))
+                {
+                    // Buffer stays full and is written out by COMMAND_STOP.
+                    SEND_LOG_DATA_STR("ERROR: previous card write still running, buffer not flushed\n");
+                }
+                else
+                {
+                    task_create("raw_write", WORKER_WRITE_PRIO, 0x800,
+                                write_buf_task, flush_src);
+                }
             }
 
             int line_size = event->w * BPP/8; // width in bytes
@@ -502,6 +567,11 @@ static void worker(void)
                 #endif
                 crop_buf = &crop_bufs[0];
                 rvx_dropped_busy = 0;
+                // Per-session counters.  video_frame_count used to be reset only when the
+                // worker task started, so the header of a second recording also counted
+                // the frames of the first.
+                video_frame_count = 0;
+                frames_on_disk = 0;
 
                 SEND_LOG_DATA_STR("worker: COMMAND_START -> raw_lv_request\n");
                 // Set LV to raw
@@ -632,24 +702,59 @@ static void worker(void)
                 // [M50 II] Finalize + CLOSE the MLV FIRST, before raw_lv_release().
                 // raw_lv_release() can fault on the D8 raw-LV teardown (LiveViewDrive::EvfDevState
                 // nullptr); closing first means the frames already written are committed to a
-                // valid, decodable file even if the teardown then wedges. On a frame-count update
-                // error we still close (never leave the handle dangling / data unflushed).
+                // valid, decodable file even if the teardown then wedges.
+
+                // Step 1: wait for a card write that is in flight (or handed to a "raw_write"
+                // task that has not run yet).  Without this the file was closed under the
+                // write, and the buffer was freed below while FIO_WriteFile() still read it.
+                int have_write_sem = (take_semaphore(write_sem, STOP_WRITE_WAIT_MS) == 0);
+
+                // Step 2: write out what is still in the buffers.  Frames are accepted into
+                // a buffer long before it fills up and is flushed, so without this up to a
+                // whole buffer of frames (and always the last, partly filled one) never
+                // reached the file.  Older data first: the buffer we are not filling can
+                // only hold data if its flush could not be started.
+                if (have_write_sem && raw_vid_fp != NULL)
+                {
+                    struct crop_buf *older = (crop_buf == &crop_bufs[0]) ? &crop_bufs[1]
+                                                                         : &crop_bufs[0];
+                    struct crop_buf *newer = (older == &crop_bufs[0]) ? &crop_bufs[1]
+                                                                      : &crop_bufs[0];
+                    if (flush_buf_and_wait(older) || flush_buf_and_wait(newer))
+                        have_write_sem = 0;
+                }
+                if (!have_write_sem)
+                    SEND_LOG_DATA_STR("ERROR: card write did not finish at stop, buffered frames lost\n");
+
+                // Step 3: finalise the header and close.
                 if (raw_vid_fp != NULL)
                 {
-                    err = update_video_frame_count(video_frame_count, header_buf, header_buf + header_size);
-                    if (err)
-                        SEND_LOG_DATA_STR("ERROR: couldn't update video frame count (closing anyway)\n");
-                    // write back the header (now with the final frame count); file is complete
-                    FIO_SeekSkipFile(raw_vid_fp, 0, SEEK_SET);
-                    FIO_WriteFile(raw_vid_fp, header_buf, header_size);
+                    if (have_write_sem)
+                    {
+                        // The count is the number of frames known to be in the file, not
+                        // the number accepted, so the header never promises more frames
+                        // than a reader will find.
+                        err = update_video_frame_count(frames_on_disk, header_buf, header_buf + header_size);
+                        if (err)
+                            SEND_LOG_DATA_STR("ERROR: couldn't update video frame count (closing anyway)\n");
+                        // write back the header (now with the final frame count); file is complete
+                        FIO_SeekSkipFile(raw_vid_fp, 0, SEEK_SET);
+                        FIO_WriteFile(raw_vid_fp, header_buf, header_size);
+                    }
+                    // else: a write is still running on this handle.  Do not move the file
+                    // position under it; the header on the card keeps frame count 0, which
+                    // MLV defines as "not finalised".  Still close, as this code always did.
                     FIO_CloseFile(raw_vid_fp);
                     raw_vid_fp = NULL;
                     SEND_LOG_DATA_STR("worker: MLV closed (finalized)\n");
+                    RVX_HEX("frames on disk", frames_on_disk);
                 }
                 else
                 {
                     SEND_LOG_DATA_STR("ERROR: unexpected fp state in worker\n");
                 }
+                if (have_write_sem)
+                    give_semaphore(write_sem);
 
                 // restore LV away from raw. This ML asserts if not paired with raw_lv_request(),
                 // but is safe; on M50 II it may fault (EvfDevState) -- the file is already closed.
@@ -704,6 +809,12 @@ void init_worker(struct msg_queue *q)
     if (edmac_sem == NULL)
     {
         SEND_LOG_DATA_STR("ERROR: worker could not create edmac sem\n");
+        return;
+    }
+    write_sem = create_named_semaphore("raw_vid_write", SEM_CREATE_UNLOCKED);
+    if (write_sem == NULL)
+    {
+        SEND_LOG_DATA_STR("ERROR: worker could not create write sem\n");
         return;
     }
     task_create("raw_v_worker", WORKER_PRIO, 0x1000, worker, NULL);
