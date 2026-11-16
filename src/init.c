@@ -1339,13 +1339,34 @@ void m50ii_dabort_stub(void);
 /* [M50II G2] Extra abort dump for the PropertyMgr boot crash pc=0xE021B8FC lr=0xE04037A1
  * dfar=0x46 (docs/offline/A4.md, F5.md section 7, G2.md). At that fault r8 = registration
  * record {handler, priv, token_cb, n, props[n]} and r6 = fresh token {n, handler, priv, ..}.
- * Prints "[ABX]" lines after the normal "[ABORT]" dump. Never proven on hardware.
- * Reads are guarded twice: address range (cacheable RAM only, never MMIO) and an MMU
- * translation probe (ATS1CPR -> PAR bit0), so an unmapped pointer is skipped, not read. */
-static uint32_t m50ii_abort_stack[256];        /* tentative decl; word [0] = re-entry marker */
+ * Prints "[ABX]" lines between the stack scan and the "[ABORT] HANG" line.
+ * Never proven on hardware.
+ *
+ * LAYOUT: all code and all strings of this block live in the output section .abx, which
+ * magiclantern.lds.S places after .data/.ARM.exidx, in the alignment gap before .bss. The
+ * only edit to existing code is that m50ii_abort_report calls m50ii_abx_uart_str instead of
+ * m50ii_uart_str (same instruction sizes), so no pre-existing symbol moves. Do not use
+ * string literals here (they would land in .rodata.str1.1 and shift .data).
+ *
+ * SAFETY: reads are guarded twice: address range (cacheable RAM only, never MMIO/ROM) and
+ * an MMU translation probe (ATS1CPR -> PAR bit0), so an unmapped pointer is skipped. A
+ * marker word at the bottom of the abort scratch stack stops a second pass if the dump
+ * itself faults (the handler then re-enters, prints the nested fault and hangs as before). */
+#define ABX_TEXT __attribute__((section(".abx.text"), noinline))
+/* Strings are deliberately NOT const: a writable input section makes the .abx output section
+ * writable, and only then does ld keep the orphan .rodata.str1.* sections right after .text
+ * (with a read-only .abx it moves them behind .abx, shifting all of .data by -32 KB). */
+#define ABX_S(name, text) static char name[] __attribute__((section(".abx.data"))) = text
 #define M50II_ABX_MARK 0xAB0D0001u
+extern void m50ii_uart_str(const char *);
 
-static int m50ii_abx_ok(uint32_t a, uint32_t len)
+ABX_S(abx_pfx, "\n[ABX] ");  ABX_S(abx_col, ":");  ABX_S(abx_sp, " ");  ABX_S(abx_nl, "\n");
+ABX_S(abx_r8, "r8 @");  ABX_S(abx_r6, "r6 @");  ABX_S(abx_r4, "r4 @");
+ABX_S(abx_a5e0, "A5E0>");  ABX_S(abx_a590, "A590>");  ABX_S(abx_a68c, "A68C @");
+ABX_S(abx_107b0, "107B0>+30 @");  ABX_S(abx_54dc, "54DC @");  ABX_S(abx_63b0, "63B0 @");
+ABX_S(abx_lbl, "\n[ABX] rec h=\0 priv=\0 tcb=\0 n=\0 props=\0 \0 \0 \0\n[ABX] tok n=\0 h=\0 priv=");
+
+static ABX_TEXT int m50ii_abx_ok(uint32_t a, uint32_t len)
 {
     uint32_t par, va = a;
     if (a < 0x1000u || a >= 0x40000000u - len) return 0;
@@ -1359,15 +1380,25 @@ static int m50ii_abx_ok(uint32_t a, uint32_t len)
     return 1;
 }
 
-static uint32_t m50ii_abx_word(uint32_t a)     /* guarded read; 0 if not readable */
+static ABX_TEXT char *m50ii_abx_hex(char *b, uint32_t v)   /* 8 hex digits + NUL (no "0x") */
+{
+    for (int i = 0; i < 8; i++)
+    {
+        uint32_t d = (v >> (28 - 4 * i)) & 0xF;
+        b[i] = d + (d < 10 ? '0' : 'A' - 10);
+    }
+    b[8] = 0;
+    return b;
+}
+
+static ABX_TEXT uint32_t m50ii_abx_word(uint32_t a)     /* guarded read; 0 if not readable */
 {
     a &= ~3u;
     return m50ii_abx_ok(a, 4) ? *(volatile uint32_t *)a : 0;
 }
 
-static void m50ii_abx_dump(const char *tag, uint32_t a, uint32_t nwords)
+static ABX_TEXT void m50ii_abx_dump(const char *tag, uint32_t a, uint32_t nwords)
 {
-    extern void m50ii_uart_str(const char *);
     char b[12];
     a &= ~3u;
     if (!m50ii_abx_ok(a, nwords * 4)) return;
@@ -1375,44 +1406,58 @@ static void m50ii_abx_dump(const char *tag, uint32_t a, uint32_t nwords)
     {
         if ((i & 7) == 0)
         {
-            m50ii_uart_str("\n[ABX] "); m50ii_uart_str(tag);
-            m50ii_uart_str(m50ii_hex(b, a)); m50ii_uart_str(":");
+            m50ii_uart_str(abx_pfx); m50ii_uart_str(tag);
+            m50ii_uart_str(m50ii_abx_hex(b, a)); m50ii_uart_str(abx_col);
         }
-        m50ii_uart_str(" "); m50ii_uart_str(m50ii_hex(b, *(volatile uint32_t *)a) + 2);
+        m50ii_uart_str(abx_sp); m50ii_uart_str(m50ii_abx_hex(b, *(volatile uint32_t *)a));
     }
 }
 
-static void m50ii_abort_xdump(uint32_t *rr, uint32_t pc)
+static ABX_TEXT void m50ii_abort_xdump(uint32_t *rr, uint32_t pc)
 {
-    extern void m50ii_uart_str(const char *);
-    if (m50ii_abort_stack[0] == M50II_ABX_MARK) return;   /* faulted in here before: skip */
-    m50ii_abort_stack[0] = M50II_ABX_MARK;
-    m50ii_abx_dump("r8 @", rr[8], 16);
-    m50ii_abx_dump("r6 @", rr[6], 16);
-    m50ii_abx_dump("r4 @", rr[4], 8);
+    extern uint32_t m50ii_abort_sp;
+    volatile uint32_t *mark = (volatile uint32_t *)(m50ii_abort_sp - 0x400);   /* m50ii_abort_stack[0] */
+    if (*mark == M50II_ABX_MARK) return;                  /* faulted in here before: skip */
+    *mark = M50II_ABX_MARK;
+    m50ii_abx_dump(abx_r8, rr[8], 16);
+    m50ii_abx_dump(abx_r6, rr[6], 16);
+    m50ii_abx_dump(abx_r4, rr[4], 8);
     if (pc == 0xE021B8FCu && m50ii_abx_ok(rr[8] & ~3u, 0x20) && m50ii_abx_ok(rr[6] & ~3u, 12))
     {
-        static const char lbl[] = "\n[ABX] rec h=\0 priv=\0 tcb=\0 n=\0 props=\0 \0 \0 \0\n[ABX] tok n=\0 h=\0 priv=";
-        const char *l = lbl;
+        const char *l = abx_lbl;
         char b[12];
         for (int i = 0; i < 11; i++)       /* 8 words of the record at r8, then 3 of the token at r6 */
         {
             m50ii_uart_str(l); while (*l++) { }
-            m50ii_uart_str(m50ii_hex(b, ((volatile uint32_t *)((i < 8 ? rr[8] : rr[6] - 32) & ~3u))[i]));
+            m50ii_uart_str(m50ii_abx_hex(b, ((volatile uint32_t *)((i < 8 ? rr[8] : rr[6] - 32) & ~3u))[i]));
         }
     }
     /* token variables of the registrants F5 lists (F5.md sections 1, 3, 4, 7) */
-    m50ii_abx_dump("A5E0>", m50ii_abx_word(0xA5E0), 10);          /* state 0x58278: tokens +8..+0x20 */
-    m50ii_abx_dump("A590>", m50ii_abx_word(0xA590), 8);           /* ApexProperty: tokens +8..+0x18 */
-    m50ii_abx_dump("A68C @", 0xA68C, 2);                          /* token at +4 */
-    m50ii_abx_dump("107B0>+30 @", m50ii_abx_word(0x107B0) + 0x30, 2);   /* token at +0x34 */
-    m50ii_abx_dump("54DC @", 0x54DC, 8);                          /* state of registration 0xE01DC11E */
-    m50ii_abx_dump("63B0 @", 0x63B0, 8);                          /* +0x1C = default prop object */
-    m50ii_uart_str("\n");
-    m50ii_abort_stack[0] = 0;
+    m50ii_abx_dump(abx_a5e0, m50ii_abx_word(0xA5E0), 10);         /* state 0x58278: tokens +8..+0x20 */
+    m50ii_abx_dump(abx_a590, m50ii_abx_word(0xA590), 8);          /* ApexProperty: tokens +8..+0x18 */
+    m50ii_abx_dump(abx_a68c, 0xA68C, 2);                          /* token at +4 */
+    m50ii_abx_dump(abx_107b0, m50ii_abx_word(0x107B0) + 0x30, 2); /* token at +0x34 */
+    m50ii_abx_dump(abx_54dc, 0x54DC, 8);                          /* state of registration 0xE01DC11E */
+    m50ii_abx_dump(abx_63b0, 0x63B0, 8);                          /* +0x1C = default prop object */
+    m50ii_uart_str(abx_nl);
+    *mark = 0;
 }
-#endif /* CONFIG_M50mk2 */
 
+/* Drop-in for m50ii_uart_str inside m50ii_abort_report: when the handler is about to print
+ * its "[ABORT] HANG" line, run the extra dump first. ctx is recovered from the stub's fixed
+ * frame: sp = m50ii_abort_sp - 16 words = [fsp, flr, r0..r12, pc]. */
+ABX_TEXT void m50ii_abx_uart_str(const char *s)
+{
+    extern uint32_t m50ii_abort_sp;
+    if (s[0] == '[' && s[1] == 'A' && s[2] == 'B' && s[3] == 'O' && s[8] == 'H')
+    {
+        uint32_t *ctx = (uint32_t *)(m50ii_abort_sp - 64);
+        m50ii_abort_xdump(&ctx[2], ctx[15]);
+    }
+    m50ii_uart_str(s);
+}
+#define m50ii_uart_str m50ii_abx_uart_str   /* for m50ii_abort_report only; #undef'd after it */
+#endif /* CONFIG_M50mk2 */
 
 void __attribute__((used)) m50ii_abort_report(uint32_t *ctx, uint32_t spsr, uint32_t type)
 {
@@ -1463,9 +1508,6 @@ void __attribute__((used)) m50ii_abort_report(uint32_t *ctx, uint32_t spsr, uint
             }
         }
     }
-#ifdef CONFIG_M50mk2
-    m50ii_abort_xdump(rr, pc);   /* [G2] extra "[ABX]" dump, docs/offline/G2.md */
-#endif
     m50ii_uart_str("[ABORT] HANG (fault captured; looping short dump)\n");
     /* [M50II 2026-07-11] Re-print a SHORT line forever (busy-delay; abort ctx has no scheduler) so
      * the lossy J-Link VCOM (drops chars at 115200 under load) eventually passes a clean copy. */
@@ -1478,6 +1520,10 @@ void __attribute__((used)) m50ii_abort_report(uint32_t *ctx, uint32_t spsr, uint
         for (volatile uint32_t d = 0; d < 0x1000000; d++) { }   /* crude inter-print delay */
     }
 }
+
+#ifdef CONFIG_M50mk2
+#undef m50ii_uart_str   /* [G2] end of the m50ii_abx_uart_str redirect */
+#endif
 
 /* THUMB stubs (SCTLR.TE=1). Entry: Abort/Undef mode, Thumb state. LR = faulting
  * instr + {4 prefetch, 8 data}. We set SP from m50ii_abort_sp (set at install),

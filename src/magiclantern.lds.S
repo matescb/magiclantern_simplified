@@ -115,6 +115,12 @@ SECTIONS
     .ARM.exidx   : { *(.ARM.exidx*) }
     __exidx_end = .;
 
+    /* [M50II G2] late-linked diagnostic code + strings (src/init.c m50ii_abx_*). Placed after
+     * all loaded sections so that adding it moves no other symbol; see docs/offline/G2.md.
+     * Must stay writable (see ABX_S in init.c) or ld moves the orphan .rodata.str1.* here.
+     * Empty (and dropped) on every other camera. */
+    .abx : { *(.abx.text) *(.abx.data) }
+
     /* BSS segment to be zeroed */
     . = ALIGN(64);
     _bss_start = .;
