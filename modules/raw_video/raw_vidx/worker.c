@@ -23,6 +23,11 @@ static enum recording_state recording_state = INACTIVE;
  * Runtime A/B: `wr <resolved-addr> 0`. */
 int rvx_wait_raw_job = 1;
 
+/* Frames the worker dropped in the current / most recent session because both crop buffers were
+ * busy (the card write of the other buffer had not finished when this one filled up).
+ * Reset on COMMAND_START; logged at stop. Read-only telemetry: `rd &rvx_dropped_busy`. */
+int rvx_dropped_busy = 0;
+
 static struct mlv_session session = {
     .fps = 0,
     .res_x = 0,
@@ -334,12 +339,19 @@ static void worker(void)
 
                 if (crop_buf->cur != crop_buf->start)
                 {
-                    // raw_write() can reset these, presumably we're writing too fast
-                    // so it's not finished.
-                    SEND_LOG_DATA_STR("After buf swap, buf was in use; not written out\n");
-                    crop_buf = NULL; // Hack, prevents next IMAGE_DATA doing anything,
-                                     // really we should flush the remaining?
-                    break; // FIXME we should stop as well
+                    // The other buffer is still being written to card (the write task
+                    // resets cur when it is done), so there is nowhere to put this frame.
+                    // Drop it and count it, and stay on the full buffer: nothing was
+                    // written to it for this frame, so a later frame simply retries the
+                    // swap, and the flush of the full buffer is triggered then.
+                    //
+                    // This used to set crop_buf = NULL, which silently discarded every
+                    // following frame until the user stopped, and lost the full buffer.
+                    crop_buf = flush_src;
+                    if ((rvx_dropped_busy & 0x3F) == 0) // rate-limited, ~every 64th drop
+                        SEND_LOG_DATA_STR("frame dropped (both crop bufs busy, card write behind)\n");
+                    rvx_dropped_busy++;
+                    break;
                 }
 
                 dst = write_video_frame_header(event->size, crop_buf->cur, crop_buf->end);
@@ -474,6 +486,7 @@ static void worker(void)
                 send_log_data_str(log_buf);
                 #endif
                 crop_buf = &crop_bufs[0];
+                rvx_dropped_busy = 0;
 
                 SEND_LOG_DATA_STR("worker: COMMAND_START -> raw_lv_request\n");
                 // Set LV to raw
@@ -637,6 +650,11 @@ static void worker(void)
                     crop_bufs[1].cur = NULL;
                     crop_bufs[1].end = NULL;
                 }
+
+                extern int rvx_dropped_queue; // event_pusher.c
+                RVX_HEX("frames accepted", video_frame_count);
+                RVX_HEX("dropped (queue full)", rvx_dropped_queue);
+                RVX_HEX("dropped (bufs busy)", rvx_dropped_busy);
 
                 stop_mlv_session();
                 recording_state = INACTIVE;

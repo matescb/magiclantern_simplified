@@ -55,6 +55,11 @@ int rvx_src_from_raw_info = 1;
  * MvRawProDs/RawPro/LvJob null-context + interrupt storm. Runtime A/B: `wr &rvx_redirect_edmac 1`. */
 int rvx_redirect_edmac = 0;
 
+/* Frames the producer (vsync CBR) dropped in the current / most recent session because the worker
+ * was behind: no free event slot, or the queue rejected the post. Reset when a session captures its
+ * first frame; logged by the worker at stop. Read-only telemetry: `rd &rvx_dropped_queue`. */
+int rvx_dropped_queue = 0;
+
 static struct msg_queue *event_q = NULL;
 
 // We post these events to the msg queue.  Since we push a pointer,
@@ -367,6 +372,7 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
     if (count == 1)
     { // per recording-session setup
         SEND_LOG_DATA_STR("Video starting.\n");
+        rvx_dropped_queue = 0;
 
         // We lie a little to increase height, we want to slightly over-allocate.
         // Old code does this, not quite sure why, perhaps DMA block size related?
@@ -405,10 +411,9 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
         // clean close (frames lost), and raw_lv_release's EvfDevState flood then wedged the cam.
         // Instead DROP this frame (classic MLV's "skip frames"): the worker catches up, the queue
         // drains, and the record continues at a lower effective fps until a clean stop is posted.
-        static int dropped_n = 0;
-        if ((dropped_n & 0x3F) == 0)   // rate-limited log (~every 64th drop)
+        if ((rvx_dropped_queue & 0x3F) == 0)   // rate-limited log (~every 64th drop)
             SEND_LOG_DATA_STR("frame dropped (queue full, consumer behind)\n");
-        dropped_n++;
+        rvx_dropped_queue++;
         return 0;
     }
 
@@ -483,9 +488,14 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
         int err = msg_queue_post(event_q, (uint32_t)event);
         if (err)
         {
-            // queue was full, should mean card writes aren't keeping up,
-            // we should stop.
-            task_create("stop_com", WORKER_PRIO + 1, 0x800, send_stop_command, NULL);
+            // The queue rejected the post.  Same situation as "no empty event" above
+            // (consumer behind), and the same policy: drop this frame, count it, keep
+            // recording.  The event was never queued, so the worker will not release
+            // it; we must, or the slot leaks.
+            release_event(event);
+            if ((rvx_dropped_queue & 0x3F) == 0)
+                SEND_LOG_DATA_STR("frame dropped (queue post failed)\n");
+            rvx_dropped_queue++;
         }
     }
     else
