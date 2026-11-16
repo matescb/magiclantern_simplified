@@ -142,6 +142,45 @@ static int state_matrix[num_states][num_inputs];
 #endif
 
 static int (*StateTransition)(void*,int,int,int,int) = 0;
+
+#ifdef CONFIG_M50mk2
+/* Runtime-selectable per-frame hook source (docs/offline/F1.md, docs/offline/A2.md).
+ *   0 (default) = EvfDevState *(0x10108), input 6 / state 3 (evfdevUpdateParam, task EvfDev)
+ *   1           = EvfState    *(0x8E8C),  input 5 / states 3..6 (evfReadOutDoneInterrupt,
+ *                 task EvfCap)
+ * Set m50ii_vsync_src from the serial shell ("wr <addr> 1"). The spy moves itself to the
+ * requested object on the next transition of the currently hooked object, so exactly one
+ * of the two objects carries the spy at any time. Set it before starting LiveView raw. */
+volatile int m50ii_vsync_src = 0;       /* requested source */
+static int m50ii_vsync_src_now = 0;     /* source whose state object carries the spy */
+
+static int stateobj_lv_spy(struct state_object * self, int x, int input, int z, int t);
+
+static struct state_object * m50ii_vsync_obj(int src)
+{
+    return src ? M50II_EVFCAP_STATE : EVF_STATE;
+}
+
+/* runs inside the spy, i.e. in the task of the currently hooked object; never blocks */
+static void m50ii_vsync_src_poll(void)
+{
+    int want = m50ii_vsync_src ? 1 : 0;
+    if (want == m50ii_vsync_src_now) return;
+
+    struct state_object * from = m50ii_vsync_obj(m50ii_vsync_src_now);
+    struct state_object * to   = m50ii_vsync_obj(want);
+    if (!from || !to) return;                   /* target not created yet: retry later */
+
+    /* refuse while something else (serial "statespy") is chained on either object */
+    if ((void*)from->StateTransition_maybe != (void*)stateobj_lv_spy) return;
+    if ((void*)to->StateTransition_maybe   != (void*)StateTransition) return;
+
+    from->StateTransition_maybe = (void*)StateTransition;   /* unhook first: never both */
+    m50ii_vsync_src_now = want;
+    to->StateTransition_maybe = (void*)stateobj_lv_spy;
+}
+#endif
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-variable"
 // without this, warns on unused old_state, in some configurations
@@ -221,8 +260,13 @@ static int FAST stateobj_lv_spy(struct state_object * self, int x, int input, in
     if (self == LV_STATE && input==5 && old_state == 5) // SYNC_GetEngineResource => perfect sync for digic :)
     #elif defined(CONFIG_M50mk2)
     /* M50 II EvfDevState(*(0x10108)) per-frame transition, found live via the serial-harness
-     * statespy: input==6 old_state==3 (a self-transition 3->3, ~fires per LV frame). */
-    if (self == EVF_STATE && input == 6 && old_state == 3)
+     * statespy: input==6 old_state==3 (a self-transition 3->3, ~fires per LV frame).
+     * Alternative (m50ii_vsync_src=1): EvfState(*(0x8E8C)) input 5 = evfReadOutDoneInterrupt,
+     * a self-transition in states 3..6 (matrix 0xE0B5050C). Only one object is hooked. */
+    m50ii_vsync_src_poll();
+    if (m50ii_vsync_src_now
+        ? (self == M50II_EVFCAP_STATE && input == 5 && old_state >= 3 && old_state <= 6)
+        : (self == EVF_STATE && input == 6 && old_state == 3))
     #elif defined(CONFIG_EVF_STATE_SYNC)
     if (self == EVF_STATE && input == 5 && old_state == 5) // evfReadOutDoneInterrupt => perfect sync for digic :)
     #else
