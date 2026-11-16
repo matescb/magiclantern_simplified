@@ -391,10 +391,10 @@ THUMB_FN(0xe05b7b42,  edmac_reset_channel)                  /* Canon per-channel
  * channel. Result: boomer mis-configured for the mem2mem WR/RD channels -> StartEDmac assert
  * Engine::Edmac.c:0x770 -> crash on record. Correct wrappers take a raw channel, look up the per-channel
  * boomer config table (DAT_e05b767c, stride 0x14), and are adjacent (kitor's EOS R VdKick e0535e64 ->
- * Selector e0535ee2 pattern). Selector verified: bilal's 0x373f0126 passes its InSelType(0x100)/
- * InSelEdmacType(0x20000000) checks for ch13/46. edmac_stop_boomer_maybe(0xe05b80c2) was already right. */
+ * Selector e0535ee2 pattern). Selector value: bilal's mk1 0x373f0126 was the starting point; mk2 passes
+ * MEM2MEM_BOOMER_SELECTOR 0x373f0226 (InSelType 0x200, see edmac-d8.c) for ch13/46. edmac_stop_boomer_maybe(0xe05b80c2) was already right. */
 THUMB_FN(0xe05b7520,  edmac_reset_boomer_vdkick)            /* Outer.c wrapper: raw chan -> low-level VdKick (was 0xe05b5720, wrong layer) */
-THUMB_FN(0xe05b752e,  edmac_select_boomer)                  /* Outer.c wrapper: (raw chan, bsel=0x373f0126) (was 0xe0683ca0, wrong layer) */
+THUMB_FN(0xe05b752e,  edmac_select_boomer)                  /* Outer.c wrapper: (raw chan, bsel=0x373f0226) (was 0xe0683ca0, wrong layer) */
 THUMB_FN(0xe05b7c48,  RegisterEDmacCompleteCBR)             /* register EDMAC completion CBR (was NOP in fn_overrides) */
 THUMB_FN(0xe05b7f68,  UnregisterEDmacCompleteCBR)           /* unregister EDMAC completion CBR */
 /* [M50mk2 RAW-VIDEO packunpack fix, docs/32] was 0xe05b8f38 = a 3-arg pack/unpack MODE SETTER
