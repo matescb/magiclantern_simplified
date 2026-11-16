@@ -273,7 +273,7 @@ THUMB_FN(0xE05BD22E,  CreateMemoryChunk)                    // called from Creat
                                                             // Matched to 200D stub, just buffer size differs (0x34 vs 0x30)
 
 /** Uncategorized **/
-DATA_PTR(   0x6450,  sd_device)                            // From function that references "SD_DeviceCreate:"
+DATA_PTR(   0x1405C,  sd_device)                            /* [M50II 1.0.1 OK, offline F7] was 0x6450 (other SD module, 0xE04E923C). Real pStgDev slot is 0x14060: SD_DeviceCreate 0xE00E5E14 does `ldr r6,=0x14060; str r4,[r6]` and fills pStgDev+0/4/8/0xC. bootflags.c:144/215 read sd_device[1], so the symbol is slot-4. */
 // [M50II 2026-07-11 REMOVED] _LoadCalendarFromRTC (was 0xe0637210): WRONG address -- landed
 // mid-instruction inside FUN_e0637136 (Canon "Arima" struct-copy), causing a NULL-store data
 // abort whenever ML ran config_save after big.8 (HW-proven, see function_overrides.c). The
