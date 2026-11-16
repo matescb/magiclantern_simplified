@@ -40,6 +40,13 @@
 //#define MLV_3_CROP_WIDTH 2048
 //#define MLV_3_CROP_HEIGHT 896
 
+// Top-left corner of the recorded window within the full raw frame, in pixels.
+// The worker starts the copy at x rounded up to a multiple of 8 and y rounded down to
+// a multiple of 2 (whole 14-bit groups, and the Bayer row phase).
+// TODO allow choosing offset and crop?
+#define MLV_3_CROP_X 200
+#define MLV_3_CROP_Y 100
+
 /* [M50 II raw_vidx bring-up] Capture-source selector.
  *   1 = read the raw frame directly from the Canon-written buffer UNCACHEABLE(raw_info.buffer)
  *       (single-buffering; proven to hold a real movie-LV frame in docs/35's single-DNG capture).
@@ -67,7 +74,10 @@ static struct msg_queue *event_q = NULL;
 //
 // Don't access these events directly, only use get_event() / release_event().
 // This handles the sem to avoid races.
-// Only the worker receives or releases events; single consumer reduces code complexity.
+// Only the worker receives events; single consumer reduces code complexity.
+// The worker releases every event it received.  The producer releases only events it
+// took but never posted (first vsync of a session, rejected post), which nobody else
+// can hold.
 static struct raw_vid_event events[RAW_VID_Q_LEN] = {0};
 static struct semaphore *events_sem = NULL;
 
@@ -298,6 +308,9 @@ static unsigned int raw_vid_keypress_cbr(unsigned int key)
                 // FIXME we should take these from menu config when we have that
                 event->w = MLV_3_CROP_WIDTH;
                 event->h = MLV_3_CROP_HEIGHT;
+                // so the worker can put the window position into the MLV frame headers
+                event->x = MLV_3_CROP_X;
+                event->y = MLV_3_CROP_Y;
                 msg_queue_post(event_q, (uint32_t)event);
                 SEND_LOG_DATA_STR("posted COMMAND_START\n");
             }
@@ -449,9 +462,8 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
 
     event->orig_frame_width = raw_info.pitch;
 
-    // TODO allow choosing offset and crop?
-    event->x = 200; // x offset within the frame, for cropping
-    event->y = 100; // y as above
+    event->x = MLV_3_CROP_X; // x offset within the frame, for cropping
+    event->y = MLV_3_CROP_Y; // y as above
     event->w = MLV_3_CROP_WIDTH;
     event->h = MLV_3_CROP_HEIGHT;
 

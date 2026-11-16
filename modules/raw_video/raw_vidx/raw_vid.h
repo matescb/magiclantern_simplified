@@ -34,8 +34,9 @@ enum event_type
     EMPTY = 0, // We zero the event to init or re-use it, so this value must be explicit.
     PREPARING, // Reserved, but otherwise empty; used to limit time spent in critical section.
 
-    // Events with these types only need to set creation_time and type,
-    // the other fields are ignored.
+    // COMMAND_START sets creation_time, type, and the window to record: w, h, x, y
+    // (the same values every following IMAGE_DATA event will carry).
+    // COMMAND_STOP only needs creation_time and type.  Other fields are ignored.
     COMMAND_START, // Producer / event_handler requests start.  Consumer / worker may reject the request.
     COMMAND_STOP,  // As above, but stop.
 

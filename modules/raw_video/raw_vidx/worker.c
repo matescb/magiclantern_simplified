@@ -28,8 +28,31 @@ static struct semaphore *write_sem = NULL;
 // accepted into the buffers, is what goes into the MLV file header.
 static uint32_t frames_on_disk = 0;
 
-// Set by the worker while it handles COMMAND_STOP.
-static int stopping = 0;
+// Bytes of frame data known to be in the file after the headers (same rule as above).
+static uint64_t bytes_on_disk = 0;
+
+// Set by the worker while it handles COMMAND_STOP (and left set if that stop wedged).
+static volatile int stopping = 0;
+
+// A card write of this session came back short (card full, I/O error), or a checkpoint
+// could not put the file back into a writable state.  Appending anything after that
+// would leave a truncated block in the middle of the file, so from then on nothing more
+// is written: frames are discarded until the user stops, and the stop only rewrites the
+// header and closes.  Set by whoever holds write_sem; reset on COMMAND_START.
+// Read-only telemetry: `rd &rvx_write_failed`.
+volatile int rvx_write_failed = 0;
+
+// A "raw_write" task was still running when COMMAND_STOP gave up waiting for it.  The
+// file handle and both crop buffers are then deliberately left alone (that task is
+// still using them) and no further recording is started in this boot.
+// Read-only telemetry: `rd &rvx_wedged`.
+volatile int rvx_wedged = 0;
+
+// Per-session limiters for messages that would otherwise repeat at frame rate.
+static struct
+{
+    int fp_null, crop_buf_null, edmac_sem, geometry, checkpoint, cbr_w, flush_wait, task_fail;
+} log_n;
 
 // MLV file name and in-memory copy of the file headers for the current session.
 // Written by the worker in COMMAND_START (before any "raw_write" task exists);
@@ -44,9 +67,14 @@ static uint32_t header_size = 0; // MLV lib returns real size here
  * COMMAND_STOP runs. FIO_CloseFile is what commits the directory entry and FAT chain; the first
  * clip that reached the card on HW (boot 212, 13.4 MB written) vanished completely after the
  * power-cycle because the file was never closed. With checkpoints a wedge costs at most the
- * frames since the last full buffer. Cost: one close + open per buffer (~16 MB).
- * Default 1. Runtime A/B: `wr &rvx_checkpoint 0` restores the single close at stop. */
-int rvx_checkpoint = 1;
+ * frames since the last full buffer.
+ * Cost: seek + header write + close + open + seek after EVERY buffer (5 frames at 1792x896, so
+ * about 5 times a second), on a card path that hardware logs show is already at its limit, and
+ * the rest of the clip goes through an O_RDWR|O_SYNC handle instead of the FIO_CreateFile one.
+ * None of this has run on the camera.
+ * Default 0 (OFF): the file is closed once, at stop. Runtime A/B: `wr &rvx_checkpoint 1`
+ * (takes effect from the next full buffer; safe to flip while recording). */
+int rvx_checkpoint = 0;
 
 static enum recording_state recording_state = INACTIVE;
 
@@ -60,11 +88,21 @@ int rvx_wait_raw_job = 1;
  * Reset on COMMAND_START; logged at stop. Read-only telemetry: `rd &rvx_dropped_busy`. */
 int rvx_dropped_busy = 0;
 
+/* Frames discarded in the current / most recent session because the file could not take them:
+ * after a failed card write (rvx_write_failed) or with no open file. Reset on COMMAND_START;
+ * logged at stop. Read-only telemetry: `rd &rvx_dropped_nofile`. */
+int rvx_dropped_nofile = 0;
+
+/* Frames dropped in the current / most recent session because the copy of the previous frame
+ * still held edmac_sem. Cannot happen with the synchronous CPU copy; kept for the day the copy
+ * goes asynchronous again. Reset on COMMAND_START; logged at stop. */
+int rvx_dropped_copy = 0;
+
 static struct mlv_session session = {
     .fps = 0,
     .res_x = 0,
     .res_y = 0,
-    .crop_offset_x = 0, // FIXME we want these correct so mlvapp can do FPM stuff, etc
+    .crop_offset_x = 0, // filled in on COMMAND_START from the requested window
     .crop_offset_y = 0,
     .pan_offset_x = 0,
     .pan_offset_y = 0,
@@ -84,9 +122,13 @@ struct crop_buf
 {
     char *_buf; // Unaligned, underlying buffer, used with malloc/free.
     char *start; // Start of aligned buf, for DMA ops, etc.
-    char *cur; // Position that data should write to.
+    // cur == start is how the worker recognises a buffer as free, and it tests that
+    // without a lock while a "raw_write" task may be resetting the buffer.  That is only
+    // correct if the task stores frames = 0 BEFORE cur = start.  Both are volatile so the
+    // compiler keeps the two stores in source order.
+    char * volatile cur; // Position that data should write to.
     char *end; // Do not write to this location or later.
-    uint32_t frames; // Number of complete VIDF blocks between start and cur.
+    volatile uint32_t frames; // Number of complete VIDF blocks between start and cur.
 };
 
 // Finds two large, aligned blocks, of equal size,
@@ -174,10 +216,17 @@ static void alloc_crop_bufs(struct crop_buf crop_bufs[])
     crop_bufs[0].start = UNCACHEABLE(crop_bufs[0].start);
     crop_bufs[1].start = UNCACHEABLE(crop_bufs[1].start);
 
+    // The allocation is buf_size bytes and start may have been moved up by as much as
+    // CROP_BUF_ALIGN - 1 to align it, so only buf_size - CROP_BUF_ALIGN bytes are
+    // guaranteed to follow start.  This used to be start + buf_size, which put end up to
+    // CROP_BUF_ALIGN - 1 bytes past the allocation.
+    const uint32_t usable_size = buf_size - CROP_BUF_ALIGN;
     crop_bufs[0].cur = crop_bufs[0].start;
-    crop_bufs[0].end = crop_bufs[0].start + buf_size;
+    crop_bufs[0].end = crop_bufs[0].start + usable_size;
+    crop_bufs[0].frames = 0;
     crop_bufs[1].cur = crop_bufs[1].start;
-    crop_bufs[1].end = crop_bufs[1].start + buf_size;
+    crop_bufs[1].end = crop_bufs[1].start + usable_size;
+    crop_bufs[1].frames = 0;
 }
 
 // Returns both crop buffers to the allocator and clears the structs,
@@ -207,8 +256,7 @@ static void edmac_cbr_w(void *unused_ctx)
 {
     edmac_copy_rectangle_adv_cleanup();
     // [M50 II] confirm completion fires; rate-limited so it doesn't flood at frame rate.
-    static int cbrw_n = 0;
-    if (cbrw_n < 5) { SEND_LOG_DATA_STR("cbr_w: give sem\n"); cbrw_n++; }
+    if (log_n.cbr_w < 5) { SEND_LOG_DATA_STR("cbr_w: give sem\n"); log_n.cbr_w++; }
     give_semaphore(edmac_sem); // signal edmac copy rect as safe to use
 }
 
@@ -248,6 +296,15 @@ static void write_buf(struct crop_buf *crop_buf)
     if (size == 0)
         return;
 
+    if (rvx_write_failed)
+    {
+        // An earlier write of this session failed part-way.  Do not append after the
+        // truncated block; give the buffer back empty.  frames first, see struct crop_buf.
+        crop_buf->frames = 0;
+        crop_buf->cur = crop_buf->start;
+        return;
+    }
+
     #ifdef RAW_VID_LOG
     uint32_t start_time = get_ms_clock();
     #endif
@@ -258,12 +315,16 @@ static void write_buf(struct crop_buf *crop_buf)
     if (written == (int)size)
     {
         frames_on_disk += crop_buf->frames;
+        bytes_on_disk += size;
     }
     else
     {
         // Card full or write error.  These frames are not counted, so the header
-        // frame count stays within what is really in the file.
-        SEND_LOG_DATA_STR("ERROR: short card write, frames in this buffer lost\n");
+        // frame count stays within what is really in the file.  Part of this buffer may
+        // be in the file; nothing more is appended after it (rvx_write_failed), so the
+        // damage is a cut-off block at the very end, which readers treat like a crash.
+        rvx_write_failed = 1;
+        SEND_LOG_DATA_STR("ERROR: short card write, frames in this buffer lost, no more data will be written; stop the recording\n");
         RVX_HEX("written", written);
     }
     #ifdef RAW_VID_LOG
@@ -281,24 +342,35 @@ static void write_buf(struct crop_buf *crop_buf)
     send_log_data_str(log_buf);
     #endif
 
-    // reset buf so it's good to use again
+    // reset buf so it's good to use again.  frames first, see struct crop_buf.
     crop_buf->frames = 0;
     crop_buf->cur = crop_buf->start;
 }
 
 // Makes the file on the card complete and self-consistent as of now: header with the
 // current frame count, closed, then reopened with the position at the end so recording
-// carries on.  Caller must hold write_sem.
+// carries on.  Caller must hold write_sem.  Only used with rvx_checkpoint = 1.
+//
+// Every step is checked.  If the file cannot be brought back to "open, positioned at
+// its end", it is left closed (what is on the card is then a valid, finalised file up
+// to this point) and the session stops writing (rvx_write_failed).
 static void checkpoint_file(void)
 {
-    if (raw_vid_fp == NULL || header_buf == NULL || header_size == 0)
+    if (raw_vid_fp == NULL || header_buf == NULL || header_size == 0 || rvx_write_failed)
         return;
 
     if (update_video_frame_count(frames_on_disk, header_buf, header_buf + header_size))
         return;
     FIO_SeekSkipFile(raw_vid_fp, 0, SEEK_SET);
-    FIO_WriteFile(raw_vid_fp, header_buf, header_size);
+    int header_written = FIO_WriteFile(raw_vid_fp, header_buf, header_size);
     FIO_CloseFile(raw_vid_fp);
+    if (header_written != (int)header_size)
+    {
+        SEND_LOG_DATA_STR("ERROR: checkpoint could not rewrite the header, recording cannot continue\n");
+        raw_vid_fp = NULL;
+        rvx_write_failed = 1;
+        return;
+    }
 
     // Same way src/fio-ml.c FIO_CreateFileOrAppend() reopens a file for appending.
     // We must not fall back to FIO_CreateFile() as that does: it would truncate.
@@ -310,13 +382,26 @@ static void checkpoint_file(void)
         // What is on the card is a valid file; we just cannot add to it.
         SEND_LOG_DATA_STR("ERROR: checkpoint could not reopen mlv, recording cannot continue\n");
         raw_vid_fp = NULL;
+        rvx_write_failed = 1;
         return;
     }
-    FIO_SeekSkipFile(fp, 0, SEEK_END);
+    // The next buffer is written wherever this seek leaves the position.  If that is not
+    // the end of the file, it would overwrite the header and the start of the clip, so
+    // do not trust it: compare with what we know we have written.
+    int64_t pos = FIO_SeekSkipFile(fp, 0, SEEK_END);
+    if (pos != (int64_t)(header_size + bytes_on_disk))
+    {
+        SEND_LOG_DATA_STR("ERROR: checkpoint seek-to-end landed elsewhere, recording cannot continue\n");
+        RVX_HEX("seek pos", (uint32_t)pos);
+        RVX_HEX("expected", (uint32_t)(header_size + bytes_on_disk));
+        FIO_CloseFile(fp);
+        raw_vid_fp = NULL;
+        rvx_write_failed = 1;
+        return;
+    }
     raw_vid_fp = fp;
 
-    static int ckpt_log_n = 0;
-    if (ckpt_log_n < 3) { RVX_HEX("checkpoint, frames on disk", frames_on_disk); ckpt_log_n++; }
+    if (log_n.checkpoint < 3) { RVX_HEX("checkpoint, frames on disk", frames_on_disk); log_n.checkpoint++; }
 }
 
 // Entry point of the "raw_write" task.  The worker took write_sem on our behalf
@@ -330,6 +415,44 @@ static void write_buf_task(struct crop_buf *crop_buf)
     give_semaphore(write_sem);
 }
 
+// DryOS task_create() returns (handle << 1) on success and a small odd error code
+// (1, 3 or 5 in the M50 II 1.0.1 ROM, 0xE05F40BA) when the task could not be created.
+static int task_create_failed(uint32_t ret)
+{
+    return (ret & 1) != 0;
+}
+
+// Checkpoints add FIO_OpenFile (a path buffer on the stack) and Canon's open / close
+// call depth to the write task, which the 0x800 stack has never carried on hardware.
+static uint32_t write_task_stack(void)
+{
+    return rvx_checkpoint ? WORKER_WRITE_STACK_CHECKPOINT : WORKER_WRITE_STACK;
+}
+
+// Hands a full buffer to a new "raw_write" task.
+// wait_ms: how long to wait for the previous "raw_write" task to give write_sem back;
+// 0 means do not wait at all.
+// Returns 0 if the task now owns write_sem and the buffer.  Otherwise nothing has
+// changed (write_sem is not held) and the caller must try again later.
+static int start_flush(struct crop_buf *crop_buf, int wait_ms)
+{
+    int err = (wait_ms > 0) ? take_semaphore(write_sem, wait_ms)
+                            : take_semaphore_now(write_sem);
+    if (err)
+        return 1;
+
+    uint32_t ret = task_create("raw_write", WORKER_WRITE_PRIO, write_task_stack(),
+                               write_buf_task, crop_buf);
+    if (task_create_failed(ret))
+    {
+        // Nobody will give write_sem back for us.
+        give_semaphore(write_sem);
+        if (log_n.task_fail < 5) { SEND_LOG_DATA_STR("ERROR: could not create raw_write task, will retry\n"); log_n.task_fail++; }
+        return 2;
+    }
+    return 0;
+}
+
 // For COMMAND_STOP: write out whatever is in crop_buf and wait for it.
 // The write runs in a "raw_write" task like every other buffer flush, so large card
 // writes always happen at WORKER_WRITE_PRIO (see raw_vid_worker.h for why that matters).
@@ -340,7 +463,16 @@ static int flush_buf_and_wait(struct crop_buf *crop_buf)
     if (crop_buf->start == NULL || crop_buf->cur == crop_buf->start)
         return 0; // nothing to write
 
-    task_create("raw_write", WORKER_WRITE_PRIO, 0x800, write_buf_task, crop_buf);
+    uint32_t ret = task_create("raw_write", WORKER_WRITE_PRIO, write_task_stack(),
+                               write_buf_task, crop_buf);
+    if (task_create_failed(ret))
+    {
+        // Last resort: write from the worker itself, at the worker's priority.  We
+        // still hold write_sem, which is all write_buf() needs.
+        SEND_LOG_DATA_STR("ERROR: could not create raw_write task at stop, writing from the worker\n");
+        write_buf(crop_buf);
+        return 0;
+    }
     return take_semaphore(write_sem, STOP_WRITE_WAIT_MS);
 }
 
@@ -361,6 +493,10 @@ static void worker(void)
 
     struct crop_buf crop_bufs[2] = {NULL};
     struct crop_buf *crop_buf = NULL;
+    // A full buffer whose "raw_write" task could not be started yet.  It is always the
+    // buffer we are NOT filling.  Retried on every following frame, and written by
+    // COMMAND_STOP at the latest.
+    struct crop_buf *pending_flush = NULL;
     uint32_t video_frame_count = 0;
 
     // space for MLV file header
@@ -400,11 +536,14 @@ static void worker(void)
                 break;
             }
 
-            if (raw_vid_fp == NULL)
+            if (raw_vid_fp == NULL || rvx_write_failed)
             {
-                // Rate-limited: this repeats for every frame once the file is gone.
-                static int fpnull_n = 0;
-                if (fpnull_n < 5) { SEND_LOG_DATA_STR("ERROR: fp was NULL at attempt to write\n"); fpnull_n++; }
+                // Nothing more can go into this file (see rvx_write_failed).  Discard and
+                // count until the user stops.  Only NULL-ness of raw_vid_fp is tested
+                // here; the handle itself is never used without write_sem.
+                // Rate-limited: this repeats for every frame.
+                if (log_n.fp_null < 5) { SEND_LOG_DATA_STR("ERROR: file not writable, frame discarded\n"); log_n.fp_null++; }
+                rvx_dropped_nofile++;
                 break;
             }
 
@@ -418,10 +557,15 @@ static void worker(void)
             {
                 // FIXME we should stop here.
                 // [M50 II] Rate-limit: this used to flood the UART and make serial unusable.
-                static int cbnull_n = 0;
-                if (cbnull_n < 5) { SEND_LOG_DATA_STR("ERROR: crop_buf was NULL at dst check\n"); cbnull_n++; }
+                if (log_n.crop_buf_null < 5) { SEND_LOG_DATA_STR("ERROR: crop_buf was NULL at dst check\n"); log_n.crop_buf_null++; }
                 break;
             }
+
+            // A full buffer is still waiting for its write task: try again, without
+            // waiting.  (This is what was missing when one failed attempt left the
+            // buffer full for the rest of the recording.)
+            if (pending_flush != NULL && start_flush(pending_flush, 0) == 0)
+                pending_flush = NULL;
 
             if (event->size > crop_buf->end - crop_buf->start)
             {
@@ -438,6 +582,24 @@ static void worker(void)
             // We want to do a (potentially cropped) copy from
             // src to dst.  We accumulate frames into a larger buffer
             // before triggering flush to disk.
+
+            // Make sure the copy of the previous frame is finished BEFORE anything is
+            // written into the buffer or counted.  This check used to come after the
+            // VIDF header was written and the frame counted, so a failure left a counted
+            // frame with stale image data in the file and lost the pending buffer flush.
+            err = take_semaphore_now(edmac_sem);
+            if (err)
+            {
+                // If this happens, it means we're not managing to save a frame
+                // before the next vsync event in event_pusher.c tries to capture one.
+                // We drop the frame rather than stop recording.
+                // [M50 II] Rate-limited (was flooding the UART).
+                if (log_n.edmac_sem < 5) { SEND_LOG_DATA_STR("ERROR: worker couldn't take edmac_sem, frame dropped\n"); log_n.edmac_sem++; }
+                rvx_dropped_copy++;
+                break;
+            }
+            // From here on every path must give edmac_sem back: the copy at the end of
+            // this case does (edmac_cbr_w), the early exits below do it themselves.
 
             char *dst = NULL;
             struct crop_buf *flush_src = NULL;
@@ -462,66 +624,70 @@ static void worker(void)
 
                 if (crop_buf->cur != crop_buf->start)
                 {
-                    // The other buffer is still being written to card (the write task
-                    // resets cur when it is done), so there is nowhere to put this frame.
-                    // Drop it and count it, and stay on the full buffer: nothing was
-                    // written to it for this frame, so a later frame simply retries the
-                    // swap, and the flush of the full buffer is triggered then.
+                    // The other buffer is not free, so there is nowhere to put this
+                    // frame.  Drop it and count it, and stay on the full buffer: nothing
+                    // was written to it for this frame, so a later frame simply retries
+                    // the swap, and the flush of the full buffer is triggered then.
                     //
                     // This used to set crop_buf = NULL, which silently discarded every
                     // following frame until the user stopped, and lost the full buffer.
+                    //
+                    // Usually the other buffer is being written to card (its write task
+                    // resets cur when done).  But it may also be full with no write task
+                    // at all, because starting one failed earlier.  Then nothing would
+                    // ever empty it and every frame would end up here; so start it now,
+                    // this time waiting a little so a lower-priority task holding
+                    // write_sem gets to run.
+                    if (pending_flush != NULL
+                        && start_flush(pending_flush, FLUSH_WRITE_WAIT_MS) == 0)
+                    {
+                        pending_flush = NULL;
+                    }
                     crop_buf = flush_src;
                     if ((rvx_dropped_busy & 0x3F) == 0) // rate-limited, ~every 64th drop
                         SEND_LOG_DATA_STR("frame dropped (both crop bufs busy, card write behind)\n");
                     rvx_dropped_busy++;
+                    give_semaphore(edmac_sem);
                     break;
                 }
 
                 dst = write_video_frame_header(event->size, crop_buf->cur, crop_buf->end);
                 if (dst == NULL)
                 {
+                    // Does not fit an empty buffer either.  Stay on the full one, so its
+                    // frames are still written at stop in the right order.
                     SEND_LOG_DATA_STR("ERROR: couldn't fit image in either buffer\n");
+                    crop_buf = flush_src;
+                    give_semaphore(edmac_sem);
                     break;
                 }
             }
             #ifdef RAW_VID_LOG
             session_data_size += (dst - crop_buf->cur + event->size);
             #endif
-            crop_buf->cur = dst + event->size; // cur after image data, which is not yet written
+            // The frame is accepted.  The image data is copied below, in this same task,
+            // before the worker looks at another event.
+            crop_buf->cur = dst + event->size;
             crop_buf->frames++;
             video_frame_count++;
 
-            err = take_semaphore_now(edmac_sem);
-            if (err)
-            {
-                // If this happens, it means we're not managing to save a frame
-                // before the next vsync event in event_pusher.c tries to capture one.
-
-                // [M50 II] Rate-limited (was flooding the UART).
-                static int sem_err_n = 0;
-                if (sem_err_n < 5) { SEND_LOG_DATA_STR("ERROR: worker couldn't take edmac_sem\n"); sem_err_n++; }
-                // FIXME this break means we're choosing to drop frames
-                // rather than stop recording, I think just stopping is better.
-                // Maybe re-imp the option from mlv_lite.
-                break;
-            }
-
-            // here we know the copy rect from the prior IMAGE_DATA has completed,
-            // as we have edmac_sem, so we can safely flush if one of the buffers was full.
+            // We hold edmac_sem, so the copy rect from the prior IMAGE_DATA has completed
+            // and the buffer that just filled up can safely go to the card.
             if (flush_src != NULL)
             {
                 // The previous "raw_write" task, if any, has already emptied its buffer
-                // (or we would not have been able to swap to it), so at worst it is a
-                // few instructions away from giving write_sem back.
-                if (take_semaphore(write_sem, FLUSH_WRITE_WAIT_MS))
+                // (or we would not have been able to swap to it).  Without checkpoints
+                // it is a few instructions away from giving write_sem back; with
+                // rvx_checkpoint = 1 it may be inside checkpoint_file() for much longer.
+                // So wait only briefly, and if that is not enough keep the buffer as
+                // pending: the next frames retry, and COMMAND_STOP writes it otherwise.
+                pending_flush = flush_src;
+                if (start_flush(pending_flush, FLUSH_WRITE_WAIT_MS) == 0)
+                    pending_flush = NULL;
+                else if (log_n.flush_wait < 5)
                 {
-                    // Buffer stays full and is written out by COMMAND_STOP.
-                    SEND_LOG_DATA_STR("ERROR: previous card write still running, buffer not flushed\n");
-                }
-                else
-                {
-                    task_create("raw_write", WORKER_WRITE_PRIO, 0x800,
-                                write_buf_task, flush_src);
+                    SEND_LOG_DATA_STR("WARN: could not start card write for full buffer yet, will retry\n");
+                    log_n.flush_wait++;
                 }
             }
 
@@ -546,8 +712,7 @@ static void worker(void)
 
             // [M50 II raw_vidx bring-up] dispatch geometry, first few frames only.
             {
-                static int wk_log_n = 0;
-                if (wk_log_n < 3)
+                if (log_n.geometry < 3)
                 {
                     RVX_HEX("wk.dst",        (uint32_t)dst);
                     RVX_HEX("wk.cbuf.start", (uint32_t)crop_buf->start);
@@ -556,7 +721,7 @@ static void worker(void)
                     RVX_HEX("wk.pitch",      raw_info.pitch);
                     RVX_HEX("wk.line_size",  line_size);
                     RVX_HEX("wk.h",          event->h);
-                    wk_log_n++;
+                    log_n.geometry++;
                 }
             }
 
@@ -592,6 +757,14 @@ static void worker(void)
                 break;
             }
 
+            if (rvx_wedged)
+            {
+                // See COMMAND_STOP: the previous recording's file handle and buffers
+                // are still owned by a card write that never came back.
+                SEND_LOG_DATA_STR("ERROR: a card write of an earlier recording never finished, cannot record again in this boot\n");
+                break;
+            }
+
             if (recording_state == INACTIVE)
             {
                 // Get mem to buffer our cropped frames.  We do this because 
@@ -621,12 +794,18 @@ static void worker(void)
                 send_log_data_str(log_buf);
                 #endif
                 crop_buf = &crop_bufs[0];
+                pending_flush = NULL;
                 rvx_dropped_busy = 0;
+                rvx_dropped_nofile = 0;
+                rvx_dropped_copy = 0;
+                rvx_write_failed = 0;
+                memset(&log_n, 0, sizeof(log_n));
                 // Per-session counters.  video_frame_count used to be reset only when the
                 // worker task started, so the header of a second recording also counted
                 // the frames of the first.
                 video_frame_count = 0;
                 frames_on_disk = 0;
+                bytes_on_disk = 0;
 
                 SEND_LOG_DATA_STR("worker: COMMAND_START -> raw_lv_request\n");
                 // Set LV to raw
@@ -703,6 +882,15 @@ static void worker(void)
                     session.fps = fps_get_current_x1000();
                     session.res_x = event->w;
                     session.res_y = event->h;
+                    // Where the recorded window starts in the full raw frame, for the
+                    // VIDF blocks (focus pixel maps and the like need it).  Same
+                    // convention as mlv_lite: crop = the 8x2-aligned position the copy
+                    // really starts at (must match the src arithmetic in IMAGE_DATA),
+                    // pan = the position that was asked for.
+                    session.crop_offset_x = (event->x + 7) & ~7;
+                    session.crop_offset_y = event->y & ~1;
+                    session.pan_offset_x = event->x;
+                    session.pan_offset_y = event->y;
 
                     if (start_mlv_session(&session))
                     {
@@ -779,13 +967,23 @@ static void worker(void)
                     if (flush_buf_and_wait(older) || flush_buf_and_wait(newer))
                         have_write_sem = 0;
                 }
-                if (!have_write_sem)
-                    SEND_LOG_DATA_STR("ERROR: card write did not finish at stop, buffered frames lost\n");
-
                 // Step 3: finalise the header and close.
-                if (raw_vid_fp != NULL)
+                if (!have_write_sem)
                 {
-                    if (have_write_sem)
+                    // A "raw_write" task is still inside FIO_WriteFile() (or a checkpoint)
+                    // on this handle, reading one of the crop buffers.  Closing the file
+                    // or freeing the buffers under it is exactly what must not happen.
+                    // So leave both alone, for good: the handle and about 32 MB stay
+                    // allocated until reboot, and no further recording is started
+                    // (rvx_wedged).  The header on the card keeps the count it had
+                    // (0, or the last checkpoint), i.e. the file looks like a crash.
+                    // 'stopping' stays set so the late task does not start a checkpoint.
+                    rvx_wedged = 1;
+                    SEND_LOG_DATA_STR("ERROR: card write did not finish at stop; file left open, buffers kept, reboot before recording again\n");
+                }
+                else
+                {
+                    if (raw_vid_fp != NULL)
                     {
                         // The count is the number of frames known to be in the file, not
                         // the number accepted, so the header never promises more frames
@@ -795,23 +993,21 @@ static void worker(void)
                             SEND_LOG_DATA_STR("ERROR: couldn't update video frame count (closing anyway)\n");
                         // write back the header (now with the final frame count); file is complete
                         FIO_SeekSkipFile(raw_vid_fp, 0, SEEK_SET);
-                        FIO_WriteFile(raw_vid_fp, header_buf, header_size);
+                        if (FIO_WriteFile(raw_vid_fp, header_buf, header_size) != (int)header_size)
+                            SEND_LOG_DATA_STR("ERROR: short write of final mlv header\n");
+                        FIO_CloseFile(raw_vid_fp);
+                        raw_vid_fp = NULL;
+                        SEND_LOG_DATA_STR("worker: MLV closed (finalized)\n");
                     }
-                    // else: a write is still running on this handle.  Do not move the file
-                    // position under it; the header on the card keeps frame count 0, which
-                    // MLV defines as "not finalised".  Still close, as this code always did.
-                    FIO_CloseFile(raw_vid_fp);
-                    raw_vid_fp = NULL;
-                    SEND_LOG_DATA_STR("worker: MLV closed (finalized)\n");
+                    else
+                    {
+                        // A checkpoint already closed the file and could not reopen it.
+                        SEND_LOG_DATA_STR("worker: MLV was already closed by a failed checkpoint\n");
+                    }
                     RVX_HEX("frames on disk", frames_on_disk);
-                }
-                else
-                {
-                    SEND_LOG_DATA_STR("ERROR: unexpected fp state in worker\n");
-                }
-                if (have_write_sem)
                     give_semaphore(write_sem);
-                stopping = 0;
+                    stopping = 0;
+                }
 
                 // restore LV away from raw. This ML asserts if not paired with raw_lv_request(),
                 // but is safe; on M50 II it may fault (EvfDevState) -- the file is already closed.
@@ -825,14 +1021,20 @@ static void worker(void)
                 session_data_size = 0;
                 #endif
 
-                // free crop buffers
+                // free crop buffers (not if a write task may still be reading them)
                 crop_buf = NULL;
-                free_crop_bufs(crop_bufs);
+                pending_flush = NULL;
+                if (!rvx_wedged)
+                    free_crop_bufs(crop_bufs);
 
                 extern int rvx_dropped_queue; // event_pusher.c
                 RVX_HEX("frames accepted", video_frame_count);
                 RVX_HEX("dropped (queue full)", rvx_dropped_queue);
                 RVX_HEX("dropped (bufs busy)", rvx_dropped_busy);
+                if (rvx_dropped_nofile)
+                    RVX_HEX("discarded (file not writable)", rvx_dropped_nofile);
+                if (rvx_dropped_copy)
+                    RVX_HEX("dropped (copy busy)", rvx_dropped_copy);
 
                 stop_mlv_session();
                 recording_state = INACTIVE;

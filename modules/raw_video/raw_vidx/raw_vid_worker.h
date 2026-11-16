@@ -25,9 +25,17 @@ enum recording_state get_recording_state(void);
 // How long COMMAND_STOP waits for one buffer write to card to finish before it gives
 // up on the buffered frames.  A full 16 MB buffer at a slow 5 MB/s is about 3 s.
 #define STOP_WRITE_WAIT_MS 10000
-// How long a frame may wait for the previous "raw_write" task to exit before its
-// buffer flush is skipped.  The task is past its FIO_WriteFile() by then.
-#define FLUSH_WRITE_WAIT_MS 1000
+// How long the worker waits for the previous "raw_write" task to give write_sem back
+// when a buffer has just filled up.  That task is past its FIO_WriteFile() by then, so
+// without checkpoints this is a few instructions.  Kept short because the worker
+// handles no frames while it waits; if it is not enough the flush is retried on the
+// following frames (see pending_flush in worker.c).
+#define FLUSH_WRITE_WAIT_MS 50
+
+// Stack of the "raw_write" task.  0x800 is what every hardware run so far used.
+// The larger one is only used with rvx_checkpoint = 1 (FIO_OpenFile + close on that stack).
+#define WORKER_WRITE_STACK 0x800
+#define WORKER_WRITE_STACK_CHECKPOINT 0x1000
 
 // Used to get space for our local buffers.  This is the initial
 // size attempted, we reduce from their until success.
