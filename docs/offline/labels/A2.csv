@@ -1,0 +1,51 @@
+address,name,evidence
+0xE05BB31A,CreateStateObject,allocs 0x20 and stores magic/name/dispatcher/matrix/dims; called with "EvfDevState" and "EvfState"
+0xE05BB2B2,StateObject_Dispatch,indexes matrix by input*max_states+current_state and calls action
+0xE05B9E60,CreateTaskClass,msg_queue_create + task_create with entry 0xE05B9E21; System::Task.c
+0xE05B9E20,TaskClass_TaskMain,receive loop calling handler at +0x14
+0xE05B9F9E,TaskClass_TryPostEvent,string "[TASK ERROR] TryPostEvent MsgQue OverFlow"; uses msg_queue_post
+0xE05B9F10,TaskClass_PostEvent,string "[TASK ERROR] PostEvent"; uses msg_queue_post_blocking
+0xE05B9EEA,TaskClass_AllocMsgNode,pops node from free list at 0x39B84
+0xE05B9DB0,TaskClass_FreeMsgNode,pushes node to free list at 0x39B84
+0xE05BA078,TaskClass_GetQueueCount,calls msg_queue_count on +0x10
+0xE05BA0A6,TaskClass_SetPriority,tail-calls 0xE05F4262 with task id at +0xC
+0xE065B5FC,EvfDev_Create,creates state object and TaskClass "EvfDev" queue 0xC8 stack 0xC00; EvfDev.c
+0xE065B5C0,evfDevEventDispatch,string "[DEV]evfDevEventDispatch Current=%d"
+0xE069A640,EvfDevState_Create,CreateStateObject(name at matrix-4, 0, 0xE0BBE0F0, 0xF, 4) stored at 0x10108
+0xE069A670,evfLvComEvent,string "evfLvComEvent(%d)"; TryPostEvent; assert EvfDevState.c L:0x174
+0xE069A7E8,evfdev_PostSyncEvent13,TryPostEvent event 0xD; assert EvfDevState.c L:0x21E
+0xE069A9C8,evfdevInit,debug string
+0xE069ABAA,evfdevResource,debug string
+0xE069AC5E,evfdevSelectPath,debug string
+0xE069AD1A,evfdevSetPath,debug string
+0xE069AE1E,evfdevPathReady,debug string
+0xE069AE7A,evfdevSyncStart,debug string
+0xE069AEDE,evfdevSendJob,debug string
+0xE069B2EA,evfdevUpdateParam,debug string
+0xE069B628,evfdevStartPath,debug string
+0xE069B65E,evfdevModechange,debug string
+0xE069B7A6,evfdevSyncStop,debug string
+0xE069B7D2,evfdevSuspend,debug string
+0xE069B7F2,evfdevEnd,debug string
+0xE069B836,evfdevThrough,debug string
+0xE0BBE0F0,EvfDevState_matrix,15 inputs x 4 states; name ptr at -4
+0xE06EEC38,EvfState_Create,CreateStateObject(name "EvfState", 0, 0xE0B5050C, 0x11, 8) stored at 0x8E8C
+0xE06CAFF4,EvfCap_Create,creates EvfState and TaskClass "EvfCap" queue 0xC8 stack 0xC00
+0xE06EED24,SendEventEvfDev,string "SendEventEvfDev : [%d][%08x]"
+0xE06EEFBA,evfInit,debug string; EvfCapState.c
+0xE06EF1D4,evfActive,debug string
+0xE06EF2FE,evfStart,debug string
+0xE06EF51E,evfSetParamInterrupt,debug string
+0xE06EF732,evfReadOutDoneInterrupt,debug string
+0xE06EF7E8,evfResetPSaveInterrupt,debug string
+0xE06EF836,evfModeChangeRequest,debug string
+0xE06EF91A,evfPrepareChangeVdInterrupt,debug string
+0xE06EFD7A,evfChangeVdInterrupt,debug string
+0xE06F0036,evfModeChangeComplete,debug string
+0xE06F008A,evfStandby,debug string
+0xE06F02A2,evfEnd,debug string
+0xE06F0354,evfIgnore,debug string
+0xE06F0374,evfPowerShutdown,debug string
+0xE06F03CA,evfMvcfComp,debug string
+0xE06F0478,evfComAct,debug string
+0xE0B5050C,EvfState_matrix,17 inputs x 8 states; name ptr at -4

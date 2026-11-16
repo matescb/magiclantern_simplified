@@ -1,0 +1,64 @@
+{
+  "description": "Known-booting M50 Mark II (fw 1.0.1) ML core symbol layout",
+  "source": "magiclantern_simplified platform/M50mk2.101/build/M50mk2_101.sym (main checkout)",
+  "branch": "walkback-milestone",
+  "commit": "a10b16c23",
+  "embedded_build_id": "3ccf499dc walkback-milestone",
+  "embedded_build_date": "2026-07-21 15:40:42 UTC",
+  "sym_md5": "d2f46ba5e091fa02d53a8aae9969442f",
+  "autoexec_md5": "1df03e45661c501ea986c9823fca7d6b",
+  "symbol_count": 1307,
+  "anchors": {
+    "m50ii_seed_edmac_cbrs": null,
+    "raw_lv_redirect_edmac": "0xe5319",
+    "raw_info": "0x104434",
+    "edmac_copy_rectangle_cbr_start": "0xec301",
+    "build_date": "0xf3549"
+  },
+  "anchor_notes": "memory note quotes m50ii_seed_edmac_cbrs==0xec2e1 (symbol not present in this build), raw_lv_redirect_edmac entry 0xE5318 (sym value 0xe5319 = Thumb bit set), raw_info 0x104474 for the 2026-07-19 stable layout (this baseline: see anchors)",
+  "autoexec_blob_offset": "0x158",
+  "core_load_address": "0xc78e0",
+  "autoexec_delta": "-0xc7788",
+  "elf_layout": {
+    "symbols": {
+      "_bss_end": "0x14fc00",
+      "_bss_start": "0x105a40",
+      "_data_start": "0xf54c8",
+      "ml_reserved_mem": "0x145850",
+      "_text_end": "0xf3328",
+      "_text_start": "0xc78e0"
+    },
+    "sections": {
+      ".text": {
+        "addr": "0xc78e0",
+        "size": "0x2dbe8",
+        "end": "0xf54c8"
+      },
+      ".rodata.str1.1": {
+        "addr": "0xf54c8",
+        "size": "0x7da8",
+        "end": "0xfd270"
+      },
+      ".rodata.str1.4": {
+        "addr": "0xfd270",
+        "size": "0xaa",
+        "end": "0xfd31a"
+      },
+      ".data": {
+        "addr": "0xfd320",
+        "size": "0x8711",
+        "end": "0x105a31"
+      },
+      ".ARM.exidx": {
+        "addr": "0x105a34",
+        "size": "0x8",
+        "end": "0x105a3c"
+      },
+      ".bss": {
+        "addr": "0x110000",
+        "size": "0x3fc00",
+        "end": "0x14fc00"
+      }
+    }
+  }
+}

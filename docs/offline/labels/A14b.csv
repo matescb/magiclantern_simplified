@@ -1,0 +1,25 @@
+address,name,evidence
+0xE0444058,LiveViewApp_handler,handler literal 0xE0444059 passed to WINSYS_CreateDialogBox by the function that logs "StartLiveViewApp(%#x)" (0xE0445864)
+0xE0445864,StartLiveViewApp,logs "StartLiveViewApp(%#x)" at 0xE0445900; creates dialog and stores it at 0xE9EC+4
+0xE07A8C30,LiveViewStarShootingTime_handler,logs "DlgLiveViewStarShootingTime.c ..." strings; literal 0xE07A8F48 loaded by 0xE07A8D10
+0xE07A8D10,StartLiveViewStarShootingTimeApp,logs "StartLiveViewStarShootingTimeApp return"; CreateDialogBox with handler 0xE07A8C31; dialog slot 0x14EB0
+0xE059F43C,WINSYS_CreateDialogBox,called with (0;0;handler;template;arg) by StartLiveViewApp and other Start*App functions; result stored as dialog; 552 callers
+0xE059F4BE,WINSYS_DeleteDialogBox,Dialog.c signature assert line 0x2F5; called with the saved dialog in StopShootOlcApp 0xE06BCCB6 and 0xE07A8D66
+0xE06BCC96,StopShootOlcApp,logs "StopShootOlcApp PopPalette(%d)"; dialog slot 0x15C4C
+0xE00E5E14,SD_DeviceCreate,logs "SD_DeviceCreate: StorageID=%d, WP=%d" and "SD_DeviceCreate: pStgDev = NULL"; stores pStgDev at 0x14060
+0xE0329D9C,DateTimer_cbr,thumb literal 0xE0329D9D passed as callback to SetTimerAfter by StartDateTimer 0xE0329DB2
+0xE05BFD48,prop_cleanup,(token;prop) validated then type-5 message to PropertyMgr; 138 callers from property handlers
+0xE05B7FB6,edmac_vdkick_off_by_channel,Edmac.c table 0xE0EC3BD4 stride 0xC; assert 0x2E7; tail-calls 0xE05B56CC; Unregister+0x4E as in M50.110/SX740; 169 callers
+0xE05B802E,edmac_select_boomer_by_channel,Edmac.c (ch;selector) asserts 0x301; stop_boomer-0x94 as in M50.110/SX740; Canon call (ch;0x017F0118) at 0xE00BEE3E; 131 callers
+0xE05B82AE,edmac_restart_channel,disable 0xE05B7B08 + reset pulse 0xE05B7AA4 + enable 0xE05B7A6C; set_address-0x1E0 (refs -0x1E2); 267 callers after set_address
+0xE05B7A32,edmac_read_kick_0x12,asserts 0x3AC unless flag bit1; reg+8=0x12; +0xB4=1; 156 callers; last call in Canon start sequence 0xE00BF440
+0xE05B7B08,edmac_disable_channel,leaf: desc[ch] reg+4 = 0; reset_channel-0x3A
+0xE05B7A6C,edmac_enable_channel,leaf: desc[ch] reg+4 = 1
+0xE05BE6A6,LockEngineResources_blocking,Create+0x1E8 as in M50.110/R.180/SX740; 105 callers; called after CreateResLockEntry at 0xE0075F52
+0xE05BE8A6,TryLockEngineResources,same signature check and try-acquire 0xE05BE638 but returns 0/1/0xD without waiting; 0 callers
+0x00011144,ctrlman_struct_gui_task_list,base used by all WindowSystem::CtrlMan.c functions; +0 recursive lock; +0x1C lock name string
+0x0000E9F0,LiveViewApp_dialog,CreateDialogBox result stored by StartLiveViewApp (base 0xE9EC + 4)
+0x00014EB0,LiveViewStarShootingTime_dialog,CreateDialogBox result stored by 0xE07A8D10
+0x00014060,sd_pStgDev,SD_DeviceCreate 0xE00E5E14 stores the device struct pointer here
+0x000167A8,DateTimer_id,timer id written by StartDateTimer and cancelled by CancelDateTimer
+0x000111B8,dialog_c_globals,WindowSystem::Dialog.c global; +4 = dialog signature compared by every Dialog.c entry

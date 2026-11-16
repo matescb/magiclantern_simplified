@@ -1,0 +1,13 @@
+address,name,evidence
+0xE0202106,fmMountCard,adr to "fmMountCard" string 0xE02023C0 at 0xE020210E; FM state table slot 0xE0B630A0
+0xE0202612,fmUnmountCard,logs "fmUnmountCard (ID = %d, Ret = %#x)" at 0xE0202626; FM state table slot 0xE0B630C8
+0xE0202704,fmInitialized,logs "fmInitialized" 0xE0202944; FM state table slot 0xE0B62F98
+0xE0202328,str_vcmMovieFormatMount_Failed,ASCII string not code; only ref adr at 0xE0201F66 after stubbed call
+0xE02023C0,str_fmMountCard,ASCII string not code
+0xE071FE72,DlgLiveView_handleMovieButton,logs "handleMovieButton RecState(%d),RTime(%d),TftSts(%d)" at 0xE071FE8A
+0xE070906A,DlgLiveView_handleMovieButtonForTimeLapse,logs "handleMovieButtonForTimeLapse RStat..." at 0xE0709082
+0xE0547518,IsEnableMovieStart,all "IsEnableMovieStart() - ..." reason strings 0xE0547700-0xE054787C
+0xE05475DC,IsEnableAnyTimeMovieStart,"IsEnableAnyTimeMovieStart() - !CARD_SAVE" loaded at 0xE05478AC
+0xE0547502,IsEnableMovieRecStart,callee whose failure prints "IsEnableMovieStart() - !IsEnableMovieRecStart"
+0xE024A8FC,mvrRecStart,logs "mvrRecStart In"; handler in MovRecState descriptor 0xE0BB79C4
+0xE0729EB4,mvrChangeAckCBR,"mvrChangeAckCBR : ..." strings 0xE072A228+; property switch

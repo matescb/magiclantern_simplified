@@ -1,0 +1,33 @@
+address,name,evidence
+0xE05F40A0,task_create_defaults_init,writes [0x5BD4+4] default stack and [0x5BD4+8] max prio; same literal 0x5BD4 as task_create
+0xE05CC5A4,CreateTask_checked,forwards r0-r3+arg to task_create 0xE05F40BA then asserts on result 5; 24 callers with task-name strings
+0xE05CC5C2,CreateTaskEx_checked,forwards args to task_create_ex 0xE05F42D2 then asserts on result 5; callers PhySw/HeartBeat0
+0xE05B9E60,CreateTaskClass,alloc 0x18 + msg_queue_create(name;r3) + task_create(name;prio;stack;0xE05B9E21;obj); callers log "CreateTaskClass" on failure (0xE04A76F0 0xE081E842)
+0xE05B9E20,TaskClass_task_entry,entry pointer passed to task_create inside CreateTaskClass (literal 0xE05B9E21 at 0xE05BA0C8)
+0xE05BBC1E,TaskClassB_task_entry,entry pointer passed to task_create at 0xE05BBCC2 (literal 0xE05BBC1F)
+0xE004A7D0,TaskClassC_task_entry,entry pointer passed to task_create at 0xE004A8DC (Startup/Terminate tasks)
+0xE072D556,MVR_Initialize,logs "MVR_Initialize %d"; creates task named [0x8B90]="MovieRecorder" via CreateTaskClass
+0xE072D4F8,MovieRecorder_task_handler,handler arg to CreateTaskClass at 0xE072D5D4
+0xE04A7676,MOVW_Initialize,string "MOVW_Initialize"; creates [0x8B80]="MovWriter" prio 0x15
+0xE049D3C4,MovWriter_task_handler,handler arg to CreateTaskClass at 0xE04A76DC
+0xE024E658,GERO_Initialize,string "GERO_Initialize"; creates [0xF9F8]="Gero"
+0xE06507F2,TCM_Initialize,string "TCM_Initialize"; creates [0x13FF4]="TimeCodeMaster"
+0xE065B5FC,EvfDev_CreateTaskClass,CreateTaskClass("EvfDev"; prio; 0xC00; 0xC8; handler) at 0xE065B640
+0xE065B5C0,EvfDev_task_handler,handler arg at 0xE065B640
+0xE06CAFF4,EvfCap_CreateTaskClass,CreateTaskClass("EvfCap"; prio; 0xC00; 0xC8; handler) at 0xE06CB038
+0xE06CAFB8,EvfCap_task_handler,handler arg at 0xE06CB038
+0xE06CB282,LVEZM_task_handler,handler arg to CreateTaskClass("LVEZM") at 0xE06CB32A
+0xE060ADA4,EIS_task_handler,handler arg to CreateTaskClass("EIS") at 0xE060B638
+0xE05BF654,PropMgr_task_handler,handler arg to CreateTaskClass("PropMgr") at 0xE05BF8FC
+0xE0796140,FileMgr_task_handler,handler arg to CreateTaskClass("FileMgr") at 0xE0796234
+0xE0680C28,CtrlSrv_Create,creates task "CtrlSrv" stack 0x4000 entry 0xE06805D9; assert file WindowSystem::CtrlSrv.c
+0xE06805D8,CtrlSrv_task,entry passed to task create at 0xE0680C6C
+0xE0396F54,DAF_task_handler,handler arg to CreateTaskClass("DAF") at 0xE0396FF4
+0xE03758D0,DAFMonitorTask,entry passed with name "DAFMonitorTask" at 0xE0375DE0
+0xE03C9A80,DAFDelivererTask,entry passed with name "DAFDelivererTask" at 0xE03C9B4E
+0xE061DCF2,AFTask,entry passed with name "AFTask" at 0xE061DDAC
+0xE06AA72A,Imager_task_handler,handler arg to CreateTaskClass("Imager") at 0xE06AA7B2
+0xE062C3CC,ISManager_task_handler,handler arg to CreateTaskClass("ISManager") at 0xE062CD9A
+0xE06EA99E,DOSDriver_task,entry passed with name "DOSDriver" at 0xE06EAA66
+0xE00AF3BE,CSMgrTask,entry passed with name "CSMgrTask" at 0xE00AF4C4
+0xE04E0A26,CamConductor_Create,task_create(name=[0x5B48]="CamConductor"; prio r1; 0x1000; 0xE010E3FF) at 0xE04E0AD0

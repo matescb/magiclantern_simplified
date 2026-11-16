@@ -1,0 +1,10 @@
+address,name,evidence
+0xE057B7BA,SRM_AllocateMemoryResourceFor1stJob,"Called at 0xE0079344 with (cbr 0xE00792DF, ctx); timeout path prints 'SRM_AllocateMemoryResourceFor1stJob failed' (0xE00794C4); allocs 0x34 msg, RscMgr.c asserts 0x30E-0x310"
+0xE057DA00,SRM_FreeMemoryResourceFor1stJob,"Called at 0xE007926C with (buffer from 1stJob cbr, 0, 0); 0x34 msg, RscMgr.c asserts 0xAB1-0xAB3; adjacent to alloc in table 0xE02D19C8"
+0xE00792DE,srm1stJob_alloc_cbr,"str r1,[r0] then give_semaphore([0xF99C+4]); passed as cbr to 0xE057B7BA"
+0xE06088D0,RscWrap_RegisterFunctions,"stm of 10 function pointers into table 0x5128 used by RscWrap thunks; called at 0xE0041378 and 0xE0041932"
+0xE06088EA,RscWrap_ClearFunctions,"zeroes the 10 slots of table 0x5128"
+0xE057CDDE,RscMgr_AllocateMemoryResource,"registered as RscWrap slot 0 at 0xE0041376 (thunk 0xE0608904)"
+0xE057CD14,RscMgr_AllocateContinuousMemoryResource,"registered as RscWrap slot 4 at 0xE0041374 (thunk 0xE0608932)"
+0xE00412B6,RscWrap_FreeMemoryResource_impl,"registered as RscWrap slot 8 at 0xE004136E (thunk 0xE0608960)"
+0xE04B3468,srmGetShootMemAreaSize,"default case prints 'srmGetShootMemAreaSize IrregalArea %d' (0xE04B3C74); switch on area id returning size constants"

@@ -1,0 +1,11 @@
+address,name,evidence
+0xE05D083A,dcache_disable_and_flush_all,"cpsid if; SCTLR bic #4 (C bit); set/way loop mcr p15,0,r2,c7,c14,2 over 128 sets x 4 ways; restores cpsr"
+0xE05D088C,dcache_invalidate_range,"(addr,size): bic r0,#0x1f; loop mcr p15,0,r0,c7,c6,1 (DCIMVAC) step 0x20; then str 0 -> 0xC1100730"
+0xE05D08B8,dcache_invalidate_all,"set/way loop mcr p15,0,r2,c7,c6,2 (DCISW) sets 0..0x1000 step 0x20, way in bits 31:30; then str 0 -> 0xC1100730"
+0xE05D0920,dcache_clean_all,"set/way loop mcr p15,0,r2,c7,c10,2 (DCCSW); then str 0 -> 0xC1100730"
+0xE05D0958,dcache_clean_invalidate_range,"(addr,size): loop mcr p15,0,r0,c7,c14,1 (DCCIMVAC) step 0x20; then str 0 -> 0xC1100730"
+0xE05D0984,dcache_clean_invalidate_all_irqoff,"mrs apsr; cpsid if; set/way loop mcr p15,0,r2,c7,c14,2 (DCCISW)"
+0xE0618F1C,XdmacWrap_open_channel,"asserts Engine::XdmacWrap.c:0x3d if chan state!=0, sets state=1, calls Xdmac init FUN_e02ea1a4 + FUN_e0369c38"
+0xE0618F8A,XdmacWrap_start_transfer_a,"asserts Engine::XdmacWrap.c:0x68 if chan not open; stores (cbr,arg) per channel; calls FUN_e02ea2b2 -> XdmacTransfer FUN_e036a0a2"
+0xE0618FEA,XdmacWrap_start_transfer_b,"asserts Engine::XdmacWrap.c:0x88 if chan not open; stores (cbr,arg) per channel; calls FUN_e0398aa8 -> XdmacTransfer FUN_e036a0a2"
+0xE036A0A2,XdmacTransfer_start,"takes per-channel semaphore, stores (cbr,arg), asserts Peripheral::XdmacTransfer.c:0x134, tail FUN_e0369f3a"

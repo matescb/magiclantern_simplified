@@ -1,0 +1,14 @@
+address,name,evidence
+0xE06CFE68,ImgSeqStore_SetDriveMode,stores r0 (<0xE asserted) to [0x1064C+8]; assert string ImageSequence::ImageSequenceStore.c
+0xE06CFE80,ImgSeqStore_GetDriveMode,returns [0x1064C+8] with <0xE assert
+0xE06D001A,ImgSeqStore_GetLvModeIndex,returns 0xE0BBFA68[0x38+mode*4] asserted <8
+0xE06D00EE,ImgSeqStore_GetHeadModeIndex,returns 0xE0BBFA68[0x118+mode*4] asserted <0xE; used to index 14-entry HEAD tables
+0xE0BBFA68,ImgSeq_DriveModeIndexMap,6 columns of 14 dwords indexed by drive mode
+0xE06E9734,HEAD_ApplyDefaultTimerTable,copies 0x50 bytes from 0xE131341C (D0406198/9C/A4 defaults) and writes register tables
+0xE131341C,HEAD_DefaultTimerRegTable,{0xD0406198=0x215;0xD040619C=0x215;0xD04061A4=0xFFFF;0xD04061B8=0;0xD0406184=1}
+0xE07E578A,PprchMvRawPro_GetModeEntry,returns 0xE1359058+idx*0x14 via key map; file string Engine::PprchMvRawProDs.c
+0xE07E57DC,PprchMvRawPro_GetSizeEntry,same key lookup then 0x18-byte entries; asserts Engine::PprchMvRawProDs.c line 0x5C
+0xE0712380,PprchCommon_GetModeEntry,returns 0xE131B810+id*0x10 with range asserts; Engine::PprchCommonDs.c
+0xE1359338,MvRawPro_LvRawGeometryTable,8 records of 11 dwords: W H 1 left top actW actH (2096x1164 at 0xE13593E8)
+0xE1358FF8,MvRawPro_ModeKeyToGeomIndex,12 {key idx} pairs searched by 0xE07E5754
+0xE071FB14,LvComPack_Dispatch,mode<6 asserted with LiveViewCore::LvComPack.c; calls handler table at RAM 0x6DC60

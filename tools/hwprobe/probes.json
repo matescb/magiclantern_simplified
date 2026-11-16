@@ -1,0 +1,265 @@
+{
+  "_comment": "Probe definitions for tools/hwprobe/hwprobe.py. Canon RAM/ROM/MMIO addresses live ONLY here, each with the report that derived it. ML RAM addresses are written sym(\"name\") and resolved from the .sym file given on the command line. Nothing here has been run on the camera: every 'expect' is a static-analysis prediction (M50 II fw 1.0.1).",
+  "version": 1,
+  "stages": {
+    "0": "identity and safety (once, LiveView, before raw is enabled)",
+    "1": "idle LiveView sampling (repeated)",
+    "2": "after raw enable (reads only; operator enables raw, or --allow-call)",
+    "3": "during a recording attempt (rate-limited sampling loop, operator starts the recording)"
+  },
+  "enable_raw": {
+    "source": "tools/mlserial/TOOLS.md:96-97; magiclantern_simplified/src/raw.c raw_lv_request",
+    "operator_text": "Enable raw now by the documented means (ML menu: raw video on, or load raw_vidx so that it calls raw_lv_request). Do not start recording.",
+    "calls": [
+      {"call": "sym(\"raw_lv_request\")", "args": [], "timeout": 5, "note": "ML function; takes raw_sem and calls lv_set_mm/lv_save_raw. Not proven non-blocking from the serial shell task."}
+    ]
+  },
+  "probes": [
+    {"id": "S0.ver", "source": "tools/mlserial/PROTOCOL.md (ver)", "stages": [0], "state": "any",
+     "title": "Shell alive, build string", "decision": "Stop if the shell does not answer; record the build string next to the .sym used.",
+     "steps": [{"cmd": "ver", "as": "ver"}], "checks": [{"op": "info", "var": "ver"}]},
+
+    {"id": "S0.sym", "source": "docs/43-boot-stability-and-layout.md (symbol layout shifts per build)", "stages": [0], "state": "any",
+     "title": "The .sym belongs to the running build (weak check: ml_started == 1)",
+     "decision": "FAIL = wrong .sym or ML not fully started; every sym() address in this run is then suspect.",
+     "steps": [{"read": "sym(\"ml_started\")", "n": 1, "as": "ml_started"}],
+     "checks": [{"var": "ml_started", "word": 0, "op": "eq", "value": "1", "pass": "ml_started reads 1 at the address the .sym gives", "fail": "not 1: wrong .sym for this build, or boot did not reach big.8"}]},
+
+    {"id": "A2.1", "source": "docs/offline/A2.md:146-147; docs/offline/F1.md:242-244 (probes 1, 2)", "stages": [0], "state": "lv_any",
+     "title": "EvfState object identity at *(0x8E8C)", "decision": "All PASS = the EvfState hook option (F1) may be tried. Any identity mismatch stops the EvfState option.",
+     "steps": [{"read": "0x8E8C", "n": 1, "as": "P_ptr"}, {"require": "P_ptr[0]", "else": "*(0x8E8C) is 0: object not created (not in LiveView?)"}, {"read": "P_ptr[0]", "n": 8, "as": "P"}],
+     "checks": [
+       {"var": "P", "word": 1, "op": "eq", "value": "0xE137558C", "pass": "name pointer is the ROM string \"EvfState\"", "fail": "name pointer differs: *(0x8E8C) is not the EvfState object"},
+       {"var": "P", "word": 3, "op": "eq", "value": "0xE05BB2B3", "pass": "dispatcher is the generic state-object dispatcher", "fail": "dispatcher differs (already hooked, or wrong object)"},
+       {"var": "P", "word": 4, "op": "eq", "value": "0xE0B5050C", "pass": "matrix is the EvfState matrix", "fail": "matrix differs"},
+       {"var": "P", "word": 5, "op": "eq", "value": "0x11", "pass": "17 inputs", "fail": "input count differs"},
+       {"var": "P", "word": 6, "op": "eq", "value": "8", "pass": "8 states", "fail": "state count differs"},
+       {"var": "P", "word": 7, "op": "eq", "value": "5", "pass": "current state 5 (LiveView steady state)", "fail": "state is not 5: not in LiveView, or the 3..6 window in F1 must be revisited"}]},
+
+    {"id": "A2.2", "source": "docs/offline/A2.md:148", "stages": [0], "state": "lv_any",
+     "title": "EvfDevState object at *(0x10108)", "decision": "Confirms which object the current hook (state 3) sits on.",
+     "steps": [{"read": "0x10108", "n": 1, "as": "Q_ptr"}, {"require": "Q_ptr[0]", "else": "*(0x10108) is 0 (zero at boot per A15; LiveView not started?)"}, {"read": "Q_ptr[0]", "n": 8, "as": "Q"}],
+     "checks": [
+       {"var": "Q", "word": 4, "op": "eq", "value": "0xE0BBE0F0", "pass": "matrix is the EvfDevState matrix", "fail": "matrix differs"},
+       {"var": "Q", "word": 7, "op": "eq", "value": "3", "pass": "state 3 in LiveView", "fail": "state is not 3"}]},
+
+    {"id": "A2.5", "source": "docs/offline/A2.md:149-153", "stages": [0], "state": "lv_any",
+     "title": "EvfDev / EvfCap TaskClass priorities", "decision": "Fixes the priority ceiling for ML copy/write tasks (A11, C9).",
+     "steps": [{"read": "0x9B48", "n": 1, "as": "D_ptr"}, {"require": "D_ptr[0]", "else": "*(0x9B48) is 0"}, {"read": "D_ptr[0]", "n": 8, "as": "D"},
+               {"read": "0x554C", "n": 1, "as": "C_ptr"}, {"require": "C_ptr[0]", "else": "*(0x554C) is 0"}, {"read": "C_ptr[0]", "n": 8, "as": "C"}],
+     "checks": [
+       {"var": "D", "word": 5, "op": "eq", "value": "0x0E", "pass": "EvfDev priority 0x0E", "fail": "EvfDev +0x14 is not 0x0E"},
+       {"var": "D", "word": 6, "op": "eq", "value": "0x0E", "pass": "EvfDev +0x18 0x0E", "fail": "EvfDev +0x18 is not 0x0E"},
+       {"var": "C", "word": 5, "op": "eq", "value": "0x0D", "pass": "EvfCap priority 0x0D", "fail": "EvfCap +0x14 is not 0x0D"},
+       {"var": "C", "word": 6, "op": "eq", "value": "0x13", "pass": "EvfCap +0x18 0x13", "fail": "EvfCap +0x18 is not 0x13"}]},
+
+    {"id": "A1.1", "source": "docs/offline/A1.md:99", "stages": [0], "state": "photo_lv",
+     "title": "Mem1Path baseline (ctx 0x10238, +0x40..+0x6f) before lv_save_raw", "decision": "+0x50 = 0 means Mem1Path is inactive in this mode and lv_save_raw cannot deliver raw there.",
+     "steps": [{"read": "0x10278", "n": 12, "as": "m1p"}],
+     "checks": [
+       {"var": "m1p", "word": 0, "op": "eq", "value": "0", "pass": "+0x40 save-raw flag is 0 (raw never enabled)", "fail": "flag already set: raw was enabled before this stage; stage-0 baseline is not a baseline"},
+       {"var": "m1p", "word": 3, "op": "eq", "value": "1", "pass": "+0x4c = 1 (Mem1Path_Init ran)", "fail": "+0x4c is not 1"},
+       {"var": "m1p", "word": 4, "op": "eq", "value": "1", "pass": "+0x50 = 1 (Mem1Path_SetPath ran, channel 3 set up)", "fail": "+0x50 = 0: Mem1Path inactive in this mode; look at +0x48 (word 2)"}]},
+
+    {"id": "A1.7", "source": "docs/offline/A1.md:105; docs/offline/F1.md:252-253 (probe 5)", "stages": [0, 2], "state": "lv_any",
+     "title": "Mem1Path completion-CBR slot 0x1029C", "decision": "Anything other than 0xE06AD51B means something replaced Canon's channel-3 callback; also tells when the slot is valid for the F1 alternative-B trampoline.",
+     "steps": [{"read": "0x1029C", "n": 2, "as": "cbr"}],
+     "checks": [{"var": "cbr", "word": 0, "op": "eq", "value": "0xE06AD51B", "pass": "slot holds Canon's semaphore-give callback", "fail": "slot replaced or not yet written"}]},
+
+    {"id": "A1.8", "source": "docs/offline/A1.md:106", "stages": [0], "state": "any",
+     "title": "Soft-assert sink 0x22D9C", "decision": "+8 non-zero = LV asserts are routed to a non-fatal sink (explains repeating prints).",
+     "steps": [{"read": "0x22D9C", "n": 3, "as": "sink"}], "checks": [{"op": "info", "var": "sink"}]},
+
+    {"id": "A8.1", "source": "docs/offline/A8.md:172-174", "stages": [0], "state": "any",
+     "title": "RscWrap function table at 0x5128", "decision": "A different slot 0/4 means the second init variant (0xE0041932) ran; the A8 pool analysis must be redone.",
+     "steps": [{"read": "0x5128", "n": 10, "as": "rsc"}],
+     "checks": [{"var": "rsc", "op": "words_eq", "value": ["0xE057CDDF", "0xE057CD15", "0xE00412B7", "0xE057B849", "0xE057A80D", "0xE00412A1", "0xE057F49B", "0xE0041295", "0xE057F439", "0xE057F3D5"], "pass": "table matches the statically derived one", "fail": "table differs"}]},
+
+    {"id": "A8.2", "source": "docs/offline/A8.md:175", "stages": [0], "state": "any",
+     "title": "RscMgr object pointer and AllocateMemory pool handle", "decision": "Both must exist before any shoot-pool / SRM experiment.",
+     "steps": [{"read": "0x5280", "n": 1, "as": "rscmgr"}, {"read": "0x51F4", "n": 1, "as": "ampool"}],
+     "checks": [{"var": "rscmgr", "word": 0, "op": "nonzero", "pass": "RscMgr object exists", "fail": "RscMgr pointer is 0"},
+                {"var": "ampool", "word": 0, "op": "nonzero", "pass": "AllocateMemory pool handle exists", "fail": "pool handle is 0"}]},
+
+    {"id": "A15.propmgr", "source": "docs/offline/A15.md:39; docs/offline/A4.md:144", "stages": [0], "state": "any",
+     "title": "PropertyMgr object pointer *(0x4FF4)", "decision": "0 = PropertyMgr not created (the QEMU divergence); property calls would assert at PropertyMgr.c:484.",
+     "steps": [{"read": "0x4FF4", "n": 1, "as": "pm"}],
+     "checks": [{"var": "pm", "word": 0, "op": "nonzero", "pass": "PropertyMgr object exists", "fail": "pointer is 0"}]},
+
+    {"id": "F4.4", "source": "docs/offline/F4.md:273-274; docs/offline/A3.md:67", "stages": [0], "state": "any",
+     "title": "DebugMsg context class levels and console gate", "decision": "Byte ctx+0x39 <= 6 means the debug-message recursion in the pool-empty path is not bounded by level; 0x5158 non-zero = console live (gate open).",
+     "steps": [{"read": "0x5154", "n": 1, "as": "dctx"}, {"require": "dctx[0]", "else": "*(0x5154) is 0 (zero at boot per A15)"}, {"read": "dctx[0] + 0x38", "n": 4, "as": "dlev"}, {"read": "0x5158", "n": 1, "as": "dgate"}],
+     "checks": [
+       {"var": "dlev", "word": 0, "op": "byte_eq", "byte": 0, "value": "5", "pass": "class-0 byte +0x38 is 5 (default)", "fail": "byte +0x38 is not the default 5"},
+       {"var": "dlev", "word": 0, "op": "byte_eq", "byte": 1, "value": "6", "pass": "byte +0x39 is 6 (default; recursion unbounded per A3)", "fail": "byte +0x39 is not the default 6"},
+       {"var": "dgate", "word": 0, "op": "nonzero", "pass": "console gate open", "fail": "gate closed (0)"}]},
+
+    {"id": "A3.3", "source": "docs/offline/A3.md:68", "stages": [0], "state": "any",
+     "title": "CPU0 interrupt stack top [0x1014]", "decision": "Confirms the faulting stack range 0xDF000000-0xDF001000 used by the pc=0 crash model.",
+     "steps": [{"read": "0x1008", "n": 8, "as": "kctx"}],
+     "checks": [{"var": "kctx", "word": 3, "op": "eq", "value": "0xDF001000", "pass": "[0x1014] = 0xDF001000", "fail": "interrupt stack top differs; the A3 overflow model needs the real range"}]},
+
+    {"id": "F4.1", "source": "docs/offline/F4.md:26-27,59-61,267-268; docs/offline/A2.md:154", "stages": [0, 1, 3], "state": "any",
+     "title": "Event-container pool: control block and free count (host-side walk of a dump)", "decision": "Free count close to 1536 at idle is the baseline; a count that falls during recording and does not return names the pool-exhaustion crash family (docs/42).",
+     "steps": [{"read": "0x39B80", "n": 3, "as": "evctl"}, {"require": "evctl[2]", "else": "pool init flag is 0: pool not built yet"},
+               {"dump": "0xBEE18", "len": "0x6000", "as": "evpool"}, {"read": "0x39B84", "n": 1, "as": "evhead"},
+               {"derive": "freelist", "head": "evhead[0]", "pool": "evpool", "base": "0xBEE18", "node": 16, "as": "evfree"}],
+     "checks": [
+       {"var": "evctl", "word": 1, "op": "range", "lo": "0xBEE18", "hi": "0xC4E17", "pass": "free-list head points into the pool", "fail": "head is 0 (pool empty) or outside 0xBEE18..0xC4E17"},
+       {"var": "evfree", "word": 0, "op": "range", "lo": "1400", "hi": "1536", "pass": "free count within 136 of the full 1536", "fail": "fewer than 1400 free containers (or walk broke, see evfree[1]); expected only while a receiver is stalled"}]},
+
+    {"id": "F4.9", "source": "docs/offline/F4.md:283-284", "stages": [0, 3], "state": "any",
+     "title": "Word at address 0 (NULL-release fingerprint)", "decision": "A value inside 0xBEE18-0xC4E18 means the pool releaser was once called with NULL: a pool-empty event happened and was survived.",
+     "steps": [{"read": "0x0", "n": 4, "as": "vec0"}],
+     "checks": [{"var": "vec0", "word": 0, "op": "not_range", "lo": "0xBEE18", "hi": "0xC4E18", "pass": "no pool pointer at address 0", "fail": "pool pointer at address 0: NULL release happened"}]},
+
+    {"id": "F5.tokens", "source": "docs/offline/F5.md:296-299", "stages": [0], "state": "any",
+     "title": "Property-token records at 0x58278 and [0xA590]", "decision": "A field equal to 0x32 (or any non-pointer) points at the module whose token variable is misused: the 0xE021B8FC EVF crash family.",
+     "steps": [{"read": "0x58278", "n": 10, "as": "tok"}, {"read": "0xA590", "n": 1, "as": "blob_ptr"}, {"require": "blob_ptr[0]", "else": "*(0xA590) is 0"}, {"read": "blob_ptr[0]", "n": 8, "as": "blob"}],
+     "checks": [
+       {"var": "tok", "op": "none_eq", "value": "0x32", "pass": "no field equals 0x32", "fail": "a token field equals 0x32"},
+       {"var": "blob", "op": "none_eq", "value": "0x32", "pass": "no field equals 0x32", "fail": "a blob token field equals 0x32"}]},
+
+    {"id": "A11.1", "source": "docs/offline/A11.md:128", "stages": [0], "state": "any",
+     "title": "Default task stack size and maximum priority", "decision": "Tells what stack 0 means for Canon tasks and the legal priority ceiling.",
+     "steps": [{"read": "0x5BD8", "n": 2, "as": "taskdef"}], "checks": [{"op": "info", "var": "taskdef"}]},
+
+    {"id": "A14c.9", "source": "docs/offline/A14c.md:88", "stages": [0], "state": "any",
+     "title": "debug_assert handler slot 0x4000", "decision": "Must hold an ML address when ML's non-fatal assert handler is installed.",
+     "steps": [{"read": "0x4000", "n": 1, "as": "ah"}],
+     "checks": [{"var": "ah", "word": 0, "op": "in_sym_range", "pass": "slot points into ML code (see nearest symbol)", "fail": "slot does not point into ML: handler not installed"}]},
+
+    {"id": "A14c.gui", "source": "docs/offline/A14c.md:82-84 (checks 3, 4, 5, read parts)", "stages": [0], "state": "any",
+     "title": "GUI mode current/requested, LV overlay index, display-on flag", "decision": "Run once per GUI state (label the run with --label) to fix GUIMODE_*, LV_OVERLAYS_MODE and DISPLAY_IS_ON polarity.",
+     "steps": [{"read": "0x7EC0", "n": 1, "as": "gui_cur"}, {"read": "0x7EC8", "n": 1, "as": "gui_req"}, {"read": "0x15998", "n": 1, "as": "lv_overlay"}, {"read": "0x13CC8", "n": 1, "as": "not_overlay"}, {"read": "0xAC64", "n": 1, "as": "disp_on"}],
+     "checks": [{"op": "info", "var": "gui_cur"}, {"op": "info", "var": "lv_overlay"}, {"op": "info", "var": "disp_on"}]},
+
+    {"id": "A9.2", "source": "docs/offline/A9.md:103,105-106", "stages": [0], "state": "lv_any",
+     "title": "Sensor drive mode, HEAD table base pointers, LvComPack handlers", "decision": "Run once per video mode (--label): gives the Canon mode -> drive mode map and the handlers to disassemble for bit depth.",
+     "steps": [{"read": "0x10654", "n": 1, "as": "drive"}, {"read": "0x216E0", "n": 2, "as": "head"}, {"read": "0x6DC60", "n": 12, "as": "lvcompack"}],
+     "checks": [
+       {"var": "drive", "word": 0, "op": "range", "lo": "6", "hi": "13", "pass": "LiveView drive mode 6..13", "fail": "0..5 = still mode, >13 = wrong address"},
+       {"var": "head", "word": 1, "op": "eq", "value": "0xF0014914", "pass": "second HEAD table base is the ROM1 blob", "fail": "base differs: table-A inference (A9-verify claim 1) is wrong"}]},
+
+    {"id": "A13.1", "source": "docs/offline/A13.md:134", "stages": [0], "state": "any", "risk": "risky_read",
+     "title": "Live MMU L1 entries for the raw buffer views", "decision": "Confirms 0x6BC/0x463 are non-cacheable and 0x2BC cacheable in the LIVE table; FAIL may only mean patch_mmu swapped tables (read TTBR-relative then).",
+     "steps": [{"read": "0xBFF21AF0", "n": 1, "as": "l1_6bc"}, {"read": "0xBFF20AF0", "n": 1, "as": "l1_2bc"}, {"read": "0xBFF2118C", "n": 1, "as": "l1_463"}],
+     "checks": [
+       {"var": "l1_6bc", "word": 0, "op": "eq", "value": "0x6B054402", "pass": "L1[0x6BC] NC/NC", "fail": "differs"},
+       {"var": "l1_2bc", "word": 0, "op": "eq", "value": "0x2B054406", "pass": "L1[0x2BC] inner WBWA", "fail": "differs"},
+       {"var": "l1_463", "word": 0, "op": "eq", "value": "0x46054402", "pass": "L1[0x463] NC/NC", "fail": "differs"}]},
+
+    {"id": "A13.8", "source": "docs/offline/A13.md:141", "stages": [0], "state": "any", "risk": "risky_read",
+     "title": "PL310 outer cache ID / control", "decision": "Informational: confirms the outer cache controller guess.",
+     "steps": [{"read": "0xC1100000", "n": 1, "as": "pl310_id"}, {"read": "0xC1100100", "n": 1, "as": "pl310_ctl"}], "checks": [{"op": "info", "var": "pl310_id"}]},
+
+    {"id": "A9.1", "source": "docs/offline/A9.md:102,104", "stages": [0], "state": "lv_any", "risk": "risky_read",
+     "title": "HEAD timers A/B and channel-3 size register", "decision": "Per video mode (--label): fps x (A+1) x (B+1) ~ 27.0e6 confirms TG_FREQ_BASE; 0xD0420250 low16 = bytes/line, high16 = lines-1 (0x048B0E54 expected in 1080p) reveals bit depth.",
+     "steps": [{"read": "0xD0406198", "n": 1, "as": "timerA"}, {"read": "0xD040619C", "n": 1, "as": "timerA2"}, {"read": "0xD04061A4", "n": 1, "as": "timerB"}, {"read": "0xD0420250", "n": 1, "as": "ch3size"}],
+     "checks": [{"var": "timerA", "word": 0, "op": "in", "value": ["0x2D1", "0x215", "0x1C5"], "pass": "timer A is one of the three table values", "fail": "timer A not in {0x2D1, 0x215, 0x1C5}"},
+                {"op": "info", "var": "timerB"}, {"op": "info", "var": "ch3size"}]},
+
+    {"id": "A5.1", "source": "docs/offline/A5.md:226-229 (checks 1 and 2, read parts only)", "stages": [0], "state": "lv_any", "risk": "risky_read",
+     "title": "EDMAC channel 3 live registers; channel 13 mux", "decision": "Shows what +4/+8/+0xB4 look like on a running write channel, and that channel 13 is unconnected (0) before any ML mem2mem attempt.",
+     "steps": [{"read": "0xD0423254", "n": 1, "as": "ch3mux"}, {"read": "0xD0420204", "n": 2, "as": "ch3ctl"}, {"read": "0xD04202B4", "n": 1, "as": "ch3conn"}, {"read": "0xD042327C", "n": 1, "as": "ch13mux"}],
+     "checks": [{"var": "ch13mux", "word": 0, "op": "eq", "value": "0", "pass": "channel 13 unconnected", "fail": "channel 13 mux already non-zero: a select without disconnect would assert BoomerSelector 0x10C"},
+                {"op": "info", "var": "ch3mux"}, {"op": "info", "var": "ch3ctl"}]},
+
+    {"id": "F1.2", "source": "docs/offline/F1.md:245-246 (probe 2); docs/offline/A2.md:147-148", "stages": [1, 2, 3], "state": "lv_any", "sample": true,
+     "title": "EvfState / EvfDevState current state", "decision": "EvfState must stay 5 and EvfDevState 3; a value that changes means the hook's state window must be revisited.",
+     "steps": [{"read": "0x8E8C", "n": 1, "as": "P_ptr", "once": true}, {"require": "P_ptr[0]", "else": "*(0x8E8C) is 0"}, {"read": "P_ptr[0] + 0x1C", "n": 1, "as": "evf_state"},
+               {"read": "0x10108", "n": 1, "as": "Q_ptr", "once": true}, {"require": "Q_ptr[0]", "else": "*(0x10108) is 0"}, {"read": "Q_ptr[0] + 0x1C", "n": 1, "as": "evfdev_state"}],
+     "checks": [{"var": "evf_state", "word": 0, "op": "eq", "value": "5", "pass": "EvfState 5", "fail": "EvfState not 5"},
+                {"var": "evfdev_state", "word": 0, "op": "eq", "value": "3", "pass": "EvfDevState 3", "fail": "EvfDevState not 3"}]},
+
+    {"id": "A1.4", "source": "docs/offline/A1.md:91,102,103", "stages": [1, 2, 3], "state": "lv_any", "sample": true,
+     "title": "MvRawProDs / RawPro 2-slot ring counts", "decision": "Count 2 at idle = pipeline already degraded, recording will storm. Count reaching 2 only while ML copies = the copy starves Canon's EDMAC completions (hypothesis a).",
+     "steps": [{"read": "0x23804", "n": 1, "as": "ds_count"}, {"read": "0x23818", "n": 1, "as": "ds_18"}, {"read": "0x23834", "n": 2, "as": "ds_ring"},
+               {"read": "0x292B0", "n": 1, "as": "rp_count"}, {"read": "0x29314", "n": 2, "as": "rp_ring"}],
+     "checks": [{"var": "ds_count", "word": 0, "op": "lt", "value": "2", "pass": "MvRawProDs count < 2", "fail": "MvRawProDs count >= 2 (L:125 condition)"},
+                {"var": "rp_count", "word": 0, "op": "lt", "value": "2", "pass": "RawPro count < 2", "fail": "RawPro count >= 2 (L:1C4 condition)"}]},
+
+    {"id": "A1.6", "source": "docs/offline/A1.md:59,104", "stages": [1, 2, 3], "state": "lv_any", "sample": true,
+     "title": "LvJob pool: six slot flags (non-zero = free)", "decision": "All six zero in one sample = LvJob.c L:D5 imminent.",
+     "steps": [{"read": "0x50AF8", "n": 1, "as": "j0"}, {"read": "0x50C80", "n": 1, "as": "j1"}, {"read": "0x50E08", "n": 1, "as": "j2"},
+               {"read": "0x50F90", "n": 1, "as": "j3"}, {"read": "0x51118", "n": 1, "as": "j4"}, {"read": "0x512A0", "n": 1, "as": "j5"}],
+     "checks": [{"op": "any_nonzero", "vars": ["j0", "j1", "j2", "j3", "j4", "j5"], "pass": "at least one LvJob slot free", "fail": "all six slots busy"}]},
+
+    {"id": "F4.2", "source": "docs/offline/F4.md:269-270; docs/offline/A3.md:66", "stages": [1, 2, 3], "state": "any", "sample": true,
+     "title": "Event-pool free-list head (cheap level indicator)", "decision": "Head 0 = pool empty (crash imminent). The exact level needs F4.1; a head that stops changing while LV runs is also informative.",
+     "steps": [{"read": "0x39B84", "n": 1, "as": "evhead_s"}],
+     "checks": [{"var": "evhead_s", "word": 0, "op": "nonzero", "pass": "free containers remain", "fail": "free list empty"}]},
+
+    {"id": "A14c.8", "source": "docs/offline/A14c.md:87", "stages": [1], "state": "lv_any", "sample": true,
+     "title": "Panel YUV buffer pointer *(0xAB10)+0xB0", "decision": "Three rotating values 0x3F4800 apart give YUV422_LV_BUFFER_1..3 (see 'distinct' in the result).",
+     "steps": [{"read": "0xAB10", "n": 1, "as": "V_ptr", "once": true}, {"require": "V_ptr[0]", "else": "*(0xAB10) is 0"}, {"read": "V_ptr[0] + 0xB0", "n": 1, "as": "yuv"}],
+     "checks": [{"op": "info", "var": "yuv"}]},
+
+    {"id": "A1.3", "source": "docs/offline/A1.md:52,101; docs/offline/C9-recommended.md:207-208", "stages": [1, 2], "state": "lv_any",
+     "title": "RawPro context 0x292B0: mode and the two EDMAC channels", "decision": "Words +0x30 / +0x34 are the channels ML must never touch. C9 stop rule: re-plan if either reads 3 (Mem1Path's own channel).",
+     "steps": [{"read": "0x292B0", "n": 28, "as": "rp"}],
+     "checks": [{"var": "rp", "word": 12, "op": "ne", "value": "3", "pass": "RawPro channel A is not 3", "fail": "channel A is 3: C9 stop rule"},
+                {"var": "rp", "word": 13, "op": "ne", "value": "3", "pass": "RawPro channel B is not 3 (0x29 expected)", "fail": "channel B is 3: C9 stop rule"}]},
+
+    {"id": "F4.6", "source": "docs/offline/F4.md:277-278; docs/offline/A3.md:71", "stages": [1, 3], "state": "any",
+     "title": "CPU0 interrupt stack floor: untouched 0xEEEEEEEE fill", "decision": "The count of leading fill words is the high-water margin; 0 = the stack reached its floor (overflow model of the pc=0 crashes).",
+     "steps": [{"read": "0xDF000000", "n": 128, "as": "istk"}, {"derive": "leading_eq", "var": "istk", "value": "0xEEEEEEEE", "as": "istk_fill"}],
+     "checks": [{"var": "istk_fill", "word": 0, "op": "nonzero", "pass": "fill pattern intact at the floor", "fail": "floor word overwritten: interrupt stack has been exhausted at least once this boot"}]},
+
+    {"id": "A2.4", "source": "docs/offline/A2.md:149-151; docs/offline/F1.md:262-264 (probe 8)", "stages": [1, 3], "state": "lv_any", "sample": true, "risk": "call",
+     "title": "Pending messages on the EvfDev and EvfCap queues (CALL 0xE05BA079)", "decision": "Near 0 = healthy. Climbing toward 200 during recording = the hook body stalls that task.",
+     "steps": [{"read": "0x9B48", "n": 1, "as": "D_ptr", "once": true}, {"require": "D_ptr[0]", "else": "*(0x9B48) is 0"}, {"read": "D_ptr[0] + 8", "n": 1, "as": "D_tc", "once": true},
+               {"call": "0xE05BA079", "args": ["D_tc[0]"], "as": "evfdev_pending", "timeout": 3},
+               {"read": "0x554C", "n": 1, "as": "C_ptr", "once": true}, {"require": "C_ptr[0]", "else": "*(0x554C) is 0"}, {"read": "C_ptr[0] + 8", "n": 1, "as": "C_tc", "once": true},
+               {"call": "0xE05BA079", "args": ["C_tc[0]"], "as": "evfcap_pending", "timeout": 3}],
+     "checks": [{"var": "evfdev_pending", "word": 0, "op": "lt", "value": "50", "pass": "EvfDev queue below 50 of 200", "fail": "EvfDev queue backing up"},
+                {"var": "evfcap_pending", "word": 0, "op": "lt", "value": "50", "pass": "EvfCap queue below 50", "fail": "EvfCap queue backing up"}]},
+
+    {"id": "A1.2", "source": "docs/offline/A1.md:100; docs/offline/C9-recommended.md:207", "stages": [2], "state": "after_raw",
+     "title": "Mem1Path after raw enable: flag, supplied buffer, armed", "decision": "+0x58 non-zero and +0x60 = 1: the LV core supplies param[8] and channel 3 is armed, raw comes through Mem1Path. +0x58 = 0: no buffer supplied, the raw path is NOT Mem1Path; stop and re-plan (C9).",
+     "steps": [{"read": "0x10278", "n": 12, "as": "m1p_raw"}, {"read": "0x10248", "n": 2, "as": "m1p_10"}, {"read": "sym(\"raw_info\") + 4", "n": 1, "as": "rawbuf"}],
+     "checks": [
+       {"var": "m1p_raw", "word": 0, "op": "ne", "value": "0", "pass": "save-raw flag set", "fail": "flag still 0: raw was not enabled"},
+       {"var": "m1p_raw", "word": 6, "op": "nonzero", "pass": "+0x58 (0x10290) holds a buffer address", "fail": "+0x58 = 0: LV core supplies no buffer"},
+       {"var": "m1p_raw", "word": 8, "op": "eq", "value": "1", "pass": "+0x60 = 1, channel 3 armed", "fail": "+0x60 not 1"},
+       {"var": "m1p_raw", "word": 6, "op": "eq", "value": "rawbuf[0]", "mask": "0xBFFFFFFF", "pass": "0x10290 equals raw_info.buffer (ignoring the uncached bit)", "fail": "0x10290 differs from raw_info.buffer: ML reads a different buffer than Canon writes"}]},
+
+    {"id": "A13.2", "source": "docs/offline/A13.md:135", "stages": [2], "state": "after_raw",
+     "title": "Cached vs uncached view of the live raw buffer, 1 s apart", "decision": "Uncached view must change between reads (frames arriving). A cached view that differs from the uncached one proves stale cache lines: any cacheable read path needs an invalidate first.",
+     "steps": [{"read": "sym(\"raw_info\") + 4", "n": 1, "as": "rawbuf"}, {"require": "rawbuf[0]", "else": "raw_info.buffer is 0: raw not enabled"},
+               {"read": "rawbuf[0] & 0xBFFFFFFF", "n": 4, "as": "cached1"}, {"read": "rawbuf[0] | 0x40000000", "n": 4, "as": "uncached1"}, {"sleep": 1.0},
+               {"read": "rawbuf[0] & 0xBFFFFFFF", "n": 4, "as": "cached2"}, {"read": "rawbuf[0] | 0x40000000", "n": 4, "as": "uncached2"}],
+     "checks": [{"var": "uncached1", "op": "var_ne", "other": "uncached2", "pass": "uncached view changed: frames are arriving", "fail": "uncached view identical after 1 s: buffer not being written (or a static dark scene; point at something moving)"},
+                {"var": "cached2", "op": "var_eq", "other": "uncached2", "pass": "cached view currently equals uncached", "fail": "cached view is stale relative to uncached (expected per A13)", "severity": "info"}]},
+
+    {"id": "A8.7", "source": "docs/offline/A8.md:191-193; tools/mlserial/TOOLS.md:98", "stages": [2], "state": "after_raw", "risk": "risky_read",
+     "title": "Channel-3 EDMAC address register 0xD04202A0", "decision": "Must equal raw_info.buffer (0x6BC61CC8 in one earlier 1080p session; moves per boot/mode).",
+     "steps": [{"read": "0xD04202A0", "n": 1, "as": "ch3addr"}, {"read": "sym(\"raw_info\") + 4", "n": 1, "as": "rawbuf"}],
+     "checks": [{"var": "ch3addr", "word": 0, "op": "eq", "value": "rawbuf[0]", "mask": "0xBFFFFFFF", "pass": "register equals raw_info.buffer", "fail": "register differs from raw_info.buffer"}]}
+  ],
+  "log_patterns": {
+    "_source": "docs/offline/F1.md:265-268 (probe 9); docs/offline/A2.md:155",
+    "MvRawProDs.c L:125": "MvRawProDs",
+    "RawPro.c L:1C4": "RawPro.c",
+    "LvJob.c L:D5": "LvJob.c",
+    "EvfDevState.c": "EvfDevState.c",
+    "EvfCapState.c": "EvfCapState.c",
+    "Edmac.c": "Edmac.c",
+    "abort": "[ABORT]",
+    "TryPostEvent overflow": "MsgQue OverFlow"
+  },
+  "not_automated": [
+    {"id": "A1.9", "source": "docs/offline/A1.md:107; F1.md:254-256", "why": "writes a word into the Mem1Path CBR slot and needs a staged trampoline (load/exec)"},
+    {"id": "A2.3 / F1.3 / F1.4", "source": "docs/offline/A2.md:149; F1.md:247-251", "why": "statespy hooks the state object (a write) and F1.4 needs the offline-evfstate-1 core build"},
+    {"id": "A3.4 / F4.5", "source": "docs/offline/A3.md:69; F4.md:275-276", "why": "writes 0 to 0x5158 and provokes the crash"},
+    {"id": "A3.5 / F4.7 / F5 main probe", "source": "docs/offline/A3.md:70; F4.md:279-281; F5.md:267-290", "why": "abort-handler changes: a core rebuild, not a serial probe"},
+    {"id": "A5.2-A5.6", "source": "docs/offline/A5.md:228-232", "why": "calls into EDMAC select/disconnect and reads 0xD044xxxx, which is not known to be awake"},
+    {"id": "A8.3-A8.6", "source": "docs/offline/A8.md:176-190", "why": "allocation calls that block forever from the shell (docs/32:1141); need a module task"},
+    {"id": "A9.6, A9.7", "source": "docs/offline/A9.md:107-108", "why": "MMIO writes to the HEAD timers; DNG column statistics on the host"},
+    {"id": "A11.2-A11.5", "source": "docs/offline/A11.md:129-132", "why": "task-list walk and A/B recordings need module code"},
+    {"id": "A13.3-A13.7", "source": "docs/offline/A13.md:136-140", "why": "cache-invalidate call and on-camera benchmarks"},
+    {"id": "A14c.1, .2, .3 (dm part), .5 (call part), .6, .7", "source": "docs/offline/A14c.md:79-86", "why": "calls (resource locks, dm levels, display off, RTC) or disassembly of RAM blobs"},
+    {"id": "F1.6, F1.7, F1.9, F1.10", "source": "docs/offline/F1.md:254-271", "why": "need module/core builds; F1.9's assert counting is covered by the stage-3 UART log tally"},
+    {"id": "F4.3, F4.8", "source": "docs/offline/F4.md:271-272,282", "why": "in-use histogram needs marking in module code; A/B recordings"}
+  ]
+}

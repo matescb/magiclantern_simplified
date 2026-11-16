@@ -1,0 +1,11 @@
+address,name,evidence
+0xE00854C4,str_FSU_PleaseDesignateUncacheableAddr,"ROM0 string 'Please Designate Uncacheable Addr!!!!!!' at file offset 0x854c4 (strings -t x); same FSU warning seen on EOS R UART (ml_discord r.md:6477)"
+0xE0085890,str_FSUBlockWrite_NotPrepared,"ROM0 string 'FSUBlockWrite: NotPrepared [W:%s s:%d c:%d' at file offset 0x85890"
+0xE0085978,str_FSU_WriteStat_AveMBs,"ROM0 string '[W:%s s:%d c:%d T:%dus Ave:%dMB/s' at file offset 0x85978; same log format seen on M50 UART (ml_discord m50.md:15942)"
+0xE008586C,str_FSU_ReadStat_AveMBs,"ROM0 string '[R:%s s:%d c:%d T:%dus Ave:%dMB/s' at file offset 0x8586c"
+0xE00DE39C,str_SD_UHS1_speed_clock,"ROM0 string 'SD-UHS1 speed=%d clock=%d' at file offset 0xde39c"
+0xE00DDAF0,str_SdUHSTuning_TryClkDown,"ROM0 string 'SdUHSTuning TryClkDown->%s' at file offset 0xddaf0"
+0xE00DF45C,str_SdUHS1TuningSamplingPointPartVDL,"ROM0 string 'SdUHS1TuningSamplingPointPartVDL %d' at file offset 0xdf45c"
+0xE00E86E8,str_evproc_DebugSTG_GetSDWriteSpeed,"ROM0 string 'DebugSTG_GetSDWriteSpeed' at file offset 0xe86e8 (name string only; handler address not resolved)"
+0xE00E87C8,str_evproc_DebugSTG_SetSDRMode,"ROM0 string 'DebugSTG_SetSDRMode' at file offset 0xe87c8 (name string only; handler address not resolved)"
+0xE00E89B0,str_evproc_DebugSTG_CacheUnCache,"ROM0 string 'DebugSTG_CacheUnCache' at file offset 0xe89b0 (name string only; handler address not resolved)"

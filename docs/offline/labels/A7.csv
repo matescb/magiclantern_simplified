@@ -1,0 +1,41 @@
+address,name,evidence
+0xE00AA480,DryEFat_WriteFile_wrapper,called from _FIO_WriteFile 0xE05B1A00 with (fd buf size driveLetter); retries once on short write
+0xE03EF740,efat_write_dispatch,indexes handler table (literal 0xE03EF88C) slot +0x10 with (handle buf size)
+0xE0084AFC,FSU_AccumulateWrittenBytes,adds size to 64-bit counter at dev+0xE8; returns 1 on 4GiB wrap
+0xE0084B2A,FSU_CallIoctl_100E,calls dev->ioctl(0 0x100E) after 4GiB wrap
+0xE00850F0,fsuCheckBlockBuffer,logs 'buf is ROM Addr' / 'Please Designate Uncacheable Addr!!!!!!'; accepts uncacheable or 32-byte aligned
+0xE00851BA,fsuGetMaxBlocks,ioctl 0x100D then 'Round Down to DefaultBlks!!!'
+0xE00851E6,fsuExecBlockReadWrite,logs 'ExecBlockReadWrite dwFunction=%d'; ioctl 0x100B/0x100C
+0xE0085282,FSUBlockRead,logs '[R:%s s:%d c:%d T:%dus Ave:%dMB/s'; installed at sd device +0 by SD_DeviceCreate
+0xE008564E,FSUBlockWrite,logs 'FSUBlockWrite: NotPrepared' and '[W:%s s:%d c:%d T:%dus Ave:%dMB/s'; installed at sd device +4
+0xE03F0026,IsUncacheableMemory,string 'IsUncacheableMemory(%p)' SystemIF::Mirror.c; returns addr > 0x3FFFFFFF
+0xE00E5C84,sdIOControl,logs 'sdIOControl: undefined'; switch on 0x1000..0x1010
+0xE00E5E14,SD_DeviceCreate,logs 'SD_DeviceCreate: StorageID=%d WP=%d'; fills device vtable
+0xE00DE690,SdEngineWrapper_ReadBlocks,sdIOControl case 0x100B target (buf sector count)
+0xE00DE6D4,SdEngineWrapper_WriteBlocks,sdIOControl case 0x100C target; lock then FUN_e01b4362
+0xE00DF332,SdEngineWrapper_IsUnlimitedBlocks,sdIOControl case 0x100D; 0 -> max 0xF800 sectors
+0xE00DF166,SdEngineWrapper_Ioctl100E,sdIOControl case 0x100E target; called every 4GiB written
+0xE05B16FA,FIO_CreateFileSC,debug tag 'CreateSC' loaded at 0xE05B1702
+0xE05B1B6C,FIO_ChainWrite,debug tag 'ChainW' loaded at 0xE05B1B72
+0xE05B1CDA,FIO_CloseFileSC,debug tag 'CloseSC' loaded at 0xE05B1CE2
+0xE05B2FD0,FIO_EmgFlush,debug tag 'EmgFlush' loaded at 0xE05B2FDC
+0xE05B2FF0,FIO_DelayFlush,debug tag 'DelayFlush' loaded at 0xE05B2FFA
+0xE05B3B90,FIO_GetFreeRU,debug tag 'FreeRU' loaded at 0xE05B3B9A
+0xE05B3E32,FIO_RegSpace,debug tag 'RegSpace' loaded at 0xE05B3E3A
+0xE05B44B0,FIO_ClearSpeedClass,debug tag 'ClearSC' loaded at 0xE05B44B4
+0xE05B4524,FIO_GetSpeedClass,debug tag 'GetSC' loaded at 0xE05B4534
+0xE05B46D0,FIO_RecordStart,debug tag 'RecordStart' loaded at 0xE05B46D4
+0xE05B474E,FIO_RecordEnd,debug tag 'RecordEnd' loaded at 0xE05B4752
+0xE05B4850,FIO_UHSITuning,debug tag 'UHSITuning' loaded at 0xE05B4854
+0xE05B4C2A,FIO_EnterSpeedClass,debug tag 'EntSC' loaded at 0xE05B4C30
+0xE05B4D4A,FIO_ExitSpeedClass,debug tag 'ExitSC' loaded at 0xE05B4D4E
+0xE00E8362,DebugSTG_RegisterEventProcedures,sequence of adr name / ldr handler / bl 0xE05CBF4E for DebugSTG_* names
+0xE00E6ECA,DebugSTG_GetSDWriteSpeed,handler literal at 0xE00E86E4 paired with name string 0xE00E86E8
+0xE00E6CA8,DebugSTG_RandomWrite,handler literal at 0xE00E8690 paired with name string 0xE00E8694
+0xE00E72A0,DebugSTG_fileio,handler literal at 0xE00E8704 paired with name string 0xE00E8708
+0xE00E75C6,DebugSTG_StartInfWrite,handler literal at 0xE00E8768 paired with name string 0xE00E876C
+0xE00E7604,DebugSTG_StopInfWrite,handler literal at 0xE00E8784 paired with name string 0xE00E8788
+0xE00E762C,DebugSTG_SetSDRMode,handler literal at 0xE00E87C4; tail-calls FIO_RecordStart/RecordEnd with 'B'
+0xE00E7360,DebugSTG_SplitPerformance,handler literal at 0xE00E87DC paired with name string 0xE00E87E0
+0xE00E65F8,DebugSTG_WriteRegData,handler literal at 0xE00E85D0 paired with name string 0xE00E85D4
+0xE00E6620,DebugSTG_ReadReg,handler literal at 0xE00E85EC paired with name string 0xE00E85F0

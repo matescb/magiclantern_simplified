@@ -1,0 +1,12 @@
+address,name,evidence
+0xE05B802E,Edmac_SelectBoomer_ch,"Engine::Edmac.c asserts 0x301/0x304/0x306; (ch,flags); table 0xE0EC3BD4[ch*12]; desc+0xB4=2; tail-calls 0xE0683CA0; 0x94 before edmac_stop_boomer_maybe exactly as mk1 edmac_select_boomer"
+0xE05B7FB6,Edmac_BoomerVdKick_Clear_ch,"Engine::Edmac.c assert 0x2e7; table 0xE0EC3BD4[ch*12]; tail-calls 0xE05B56CC; UnregisterEDmacCompleteCBR+0x4E as mk1 edmac_reset_boomer_vdkick"
+0xE05B7FDE,Edmac_BoomerVdKick_Set_ch,"Engine::Edmac.c assert 0x2ee; table 0xE0EC3BD4[ch*12]; tail-calls 0xE05B56F6"
+0xE05B8006,Edmac_BoomerVdKick_Pulse_ch,"Engine::Edmac.c assert 0x2f5; table 0xE0EC3BD4[ch*12]; tail-calls 0xE05B5720"
+0xE05B56CC,BoomerVdKick_Clear,"indexes 0xE1086A9C by id>>16; writes 0 to node register; assert line 0x141"
+0xE05B56F6,BoomerVdKick_Set,"indexes 0xE1086A9C by id>>16; writes 1 to node register; assert line 0x14a"
+0xE05B5720,BoomerVdKick_Pulse,"indexes 0xE1086A9C by id>>16; writes 0 then 1; assert line 0x153"
+0xE05B7520,Outer_BoomerVdKick_Pulse,"indexes Outer table 0xE1087A8C stride 0x14; tail-calls 0xE05B5720; currently stubbed as edmac_reset_boomer_vdkick"
+0xE05B752E,Outer_SelectBoomer,"Engine::Outer.c asserts 0xA0/0xA2/0xCD; table 0xE1087A8C stride 0x14; currently stubbed as edmac_select_boomer"
+0xE0EC3BD4,edmac_ch_boomer_table,"stride 12 {boomer_id,insel_type,insel_mask}; entry 13 = {0x000C0000,0x100,0x20000000}; entry 46 = {0x00E70000,0,0}"
+0xE1087A8C,outer_boomer_table,"stride 0x14 {boomer_id,type,mask,fn,fn}; entry 13 = {0x004E0000,0x200,0x00040000,0xE05B75D7,0xE05B763B}"

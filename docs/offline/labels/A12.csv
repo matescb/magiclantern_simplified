@@ -1,0 +1,11 @@
+address,name,evidence
+0xE05BE4BE,CreateResLockEntry,"(ids,count): allocs 0x24 entry, copies ids to [+0x14], count [+0x18], lazily creates 0x14-byte per-ID nodes in bucket id>>16; 132 BL callers"
+0xE05BE5A2,DeleteResLockEntry,"checks entry magic (ret 7), ret 0xd if state==2 (locked), else frees ids array + entry; called right after UnLock in Mem1Path EngRscUnlock 0xE07544AA; 28 BL callers"
+0xE05BE5CE,ersc_set_nodes_locked_flag,"(entry,flag): writes flag to node+0x10 for every id of the entry; called with 1 by lock paths and 0 by unlock"
+0xE05BE638,ersc_check_nodes_free,"(entry): returns 0 if all nodes free, 0x1f if any node+0x10==1, 0x1d on list corruption"
+0xE05BE6A6,LockEngineResources,"BLOCKING lock: on 0x1f queues entry on waiter list, creates sem 'EFM_ERSC', take_semaphore(timeout 0); 105 BL callers incl. Mem1Path EngRscLock 0xE075446C; at CreateResLockEntry+0x1E8 exactly like M50/R/SX740 stubs"
+0xE05BE740,UnLockEngineResources,"requires state==2, clears node flags, state=3, re-tries every waiter (give_semaphore or async cbr); 114 BL callers"
+0xE05BE7EE,LockEngineResourcesAsync,"(entry,cbr,arg): stores cbr/arg at +0x1c/+0x20, calls cbr immediately if free else queues; 2 BL callers"
+0xE05BE8A6,TryLockEngineResources,"non-blocking: returns 0 locked, 1 already locked by this entry, 0xd if any resource busy (maps 0x1f->0xd), never waits; 0 BL callers and 0 literal-pool refs in ROM0"
+0xE075444C,Mem1Path_EngRscLock,"string 'Mem1Path EngRscLock', LiveViewDrive::Mem1Path.c line 0x10b/0x10d; locks {0x10062,0x10072,0x100B1}"
+0xE075448E,Mem1Path_EngRscUnlock,"string 'Mem1Path EngRscUnlock'; UnLock then Delete of entry at [0x10238+0x54]"

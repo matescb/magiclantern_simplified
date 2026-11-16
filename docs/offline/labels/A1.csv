@@ -1,0 +1,35 @@
+address,name,evidence
+0xE0753D86,Mem1Path_evproc_lv_set_mm,writes Mem1Path ctx(0x10238)+0x44 and (ctx+0x6c)+0xc=!arg; registered as eventproc beside lv_set_raw strings
+0xE0753D9C,Mem1Path_WrDmacCompleteCBR,registered on EDMAC ch3 at E075428A; tail-calls ctx+0x64(ctx+0x68)
+0xE0753DAA,Mem1Path_Init,registers lv_af_raw/lv_rshd_raw/lv_set_raw eventprocs then sets ctx+0x4c=1; asserts use LiveViewDrive::Mem1Path.c
+0xE07541A4,Mem1Path_SetCompleteCBR,stores r0/r1 to ctx+0x64/+0x68; called from ImagerState E06AD6F0 with imagerMem1PathWrDmacCompleteCBR
+0xE07541AC,Mem1Path_ClearCompleteCBR,zeroes ctx+0x64/+0x68
+0xE0754236,Mem1Path_SetPath,asserts Mem1Path.c:0x176; locks resources resets EDMAC ch3 registers CBR sets ctx+0x50=1
+0xE0754298,Mem1Path_SetParam,per-frame: if ctx+0x40 and param[8] then edmac_set_size/edmac_set_address on ch3 else stops ch3; assert Mem1Path.c:0x19D
+0xE075436E,Mem1Path_ClearPath,assert Mem1Path.c:0x1EB; unregisters ch3 CBR unlocks resources ctx+0x50=0
+0xE0754424,Mem1Path_GetCurrentBuffer,returns ctx+0x58 (address last programmed into EDMAC ch3)
+0xE075442A,Mem1Path_SetSaveRawFlag,writes ctx+0x40; tail-called by lv_save_raw handler E06C0D04
+0xE0754430,Mem1Path_GetMmFlag,returns ctx+0x44
+0xE0754436,Mem1Path_GetFirstBuffer,returns ctx+0x5c (buffer latched on first armed frame)
+0xE06CFA70,CapPath_CompleteCBR,ORs bit into 0x10220+8 logs 'CapPath Complete 0x%x(0x%x)' calls ctx+0x10 when mask==1; LiveViewDrive::Path.c
+0xE06CFBF2,CapPath_Start,calls MvRawProPath_Start plus two sibling path starts
+0xE06CFC2C,CapPath_SetParam,calls two sibling SetParam (E07AE264 E077054A) then MvRawProPath SetParam E076FEB8 then tail-calls Mem1Path_SetParam
+0xE076FCC4,MvRawProPath_CompleteCBR,logs 'MvRawProPath CompleteCBR' then calls ctx(0x1910C)+4
+0xE076FCE2,MvRawProPath_AbortCBR,logs 'MvRawProPath AbortCBR' then calls ctx+0x20
+0xE076FD4A,MvRawProPath_SetCompleteCBR,stores r0/r1 to ctx+4/+8
+0xE076FD60,MvRawProPath_SetPath,logs 'MvRawProPath SetPath[%d][%d]'; calls MvRawProDs create E07B9B28
+0xE076FDF2,MvRawProPath_Start,assert MvRawProPath.c:0x115; calls E07B9CB0 then E07B9D08 when ctx+0x10==0
+0xE076FE20,MvRawProPath_Clear,logs 'MvRawProPath Clear[%d]'
+0xE076FE6C,MvRawProPath_Cancel,logs 'MvRawProPath Cancel[%d]'
+0xE07B9AD0,MvRawProDs_SubCompleteCBR,ORs bit into ctx(0x23800)+0x20; when equal to ring[0] shifts ring decrements ctx+4 calls ctx+8
+0xE07B9B28,MvRawProDs_Create,zeroes ring/count/masks; stores arg1 to ctx+0x30; calls RawPro create E0760A88 and registers E07B9AD1
+0xE07B9CB0,MvRawProDs_PushFrame,pushes ctx+0x18 into 2-slot ring at ctx+0x34; assert/soft-assert MvRawProDs.c:0x125 when count>=2
+0xE0760A30,RawPro_EDmacCompleteCBR,registered via RegisterEDmacCompleteCBR on ctx(0x292B0)+0x30 (arg 2) and +0x34 (arg 1); pops 2-slot ring at ctx+0x64
+0xE0760A88,RawPro_Create,zeroes ring/count; stores EDMAC channels to ctx+0x30/+0x34 mode to ctx+4; registers E0760A31
+0xE0760DEC,RawPro_SetCompleteCBR,stores r0/r1 to ctx+0x14/+0x18
+0xE0760E74,RawPro_PushFrame,pushes expected-completion mask into ring at ctx+0x64; assert/soft-assert RawPro.c:0x1C4 when count>=2
+0xE06AF4B2,LvJob_CreateJob,scans 6 slots at 0x50AF8 (0x188 each); logs 'LiveView CreateJob BufferOver'; assert LvJob.c:0xD5 when none free
+0xE06AF552,LvJob_ReleaseJob,sets job[0]=1 (free); referenced from stage tables at E099F658..
+0xE06AD420,imagerVDInterruptCBR,logs string 'imagerVDInterruptCBR'; LiveView::ImagerState.c
+0xE06AD51A,imagerMem1PathWrDmacCompleteCBR,logs that string; gives semaphore when ImagerState(0x93A4)+0xc is 1 or 2
+0xE06C811E,EngAssert_IsSoftMode,returns [0x22D9C+8]; callers print via E06C8124 instead of asserting when nonzero

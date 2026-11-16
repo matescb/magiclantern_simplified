@@ -1,0 +1,294 @@
+# C10 - Integration branch for the next hardware session
+
+Offline work, no camera attached. Nothing here proves behaviour on the camera.
+
+## Goal
+
+One branch and one staged card directory for the next hardware session: the C4 module fixes
+with every C4-review finding dealt with, the writer bugs C1 found by host replay fixed, the
+C4c and C8 commits picked in, and the core layout unchanged from the booting baseline.
+
+## Summary
+
+- Worktree `/mnt/data/WORK/eos/wt/C10`, branch **`offline-integrate1`**, tip `9633ac828`,
+  14 commits on `a10b16c23`.
+- **Branch name differs from the one in the task.** The task asked for `offline-integrate-1`
+  and called it 18 characters; it is 19. I built it both ways: with the 19-character name
+  53 core symbols move (+1/+4/+8 bytes) and the gate fails; with the 18-character
+  `offline-integrate1` the `.sym` is byte-identical to the baseline. I kept the 18-character
+  name. No branch called `offline-integrate-1` exists.
+- Core: `.sym` identical to baseline (md5 `d2f46ba5e091fa02d53a8aae9969442f`), **0 symbols
+  moved, added or removed**, all section ends unchanged. `autoexec.bin` differs from the
+  baseline in 91 bytes: date/commit/branch strings, the 4-byte trailer, and the one timer
+  literal (32000000 -> 27000000 at file offset 0x18e20).
+- All nine review findings and C1's B2-B6 are fixed or recorded below with the reason.
+- Host tests: 17 tests, 124 checks, 0 failures on the new sources. The 7 new tests fail on
+  the `offline/C4` sources, which reproduces review findings 1-6 on the host.
+- Host MLVs from the new `mlv_3.c`: clean-stop files have header count = frames present,
+  relative timestamps, crop/pan 200,100; `mlv_check` exit 0.
+- Staged card: `/mnt/data/WORK/eos/sim/C10/card`, `check_card_image.py` PASS. Nothing flashed.
+
+## What was done
+
+### Commits on `offline-integrate1` (after the 8 from `offline/C4`)
+
+| Commit | Origin | Change |
+|---|---|---|
+| `28dce2a4b` | cherry-pick of C4c `a890f1690` | `src/fps-engio.c`: `TG_FREQ_BASE 27000000` for `CONFIG_M50mk2` |
+| `962f4d0a2` | cherry-pick of C4c `797627c32` | `stubs.S` comment: boomer selector value |
+| `21718a886` | cherry-pick of C4c `1f324fa84` | `edmac-d8.c`: test `CONFIG_EDMAC_MEMCPY_D8` after the headers |
+| `35797ca83` | cherry-pick of C8 `8b297cfad` | `modules.included`: `mlv_lite` removed |
+| `ee73cef70` | new | `mlv_3.c`: VIDF timestamp relative to session start; session copies crop/pan offsets |
+| `9633ac828` | new | `worker.c`, `event_pusher.c`, `raw_vid.h`, `raw_vid_worker.h`: review findings 1-8, B3-B5 |
+
+The four cherry-picks applied without conflicts. C8's second commit (`e32ef27ea`, mlv_lite
+cleanup) was not taken, as instructed.
+
+### C4-review findings
+
+| # | Finding | Status | What changed (`worker.c` unless noted) |
+|---|---|---|---|
+| 1 | After one `write_sem` timeout every frame is dropped until stop | Fixed | A full buffer whose write task could not be started is kept in `pending_flush`. It is retried without waiting at the start of every IMAGE_DATA, and with a 50 ms wait in the both-buffers-busy branch (the reviewer's suggestion). `FLUSH_WRITE_WAIT_MS` 1000 -> 50, since a miss is no longer final and the worker handles no frames while it waits. |
+| 2 | Checkpoint default on, cost on the write path, unchecked seek and header write, 0x800 stack | Fixed | `rvx_checkpoint` default **0**. When enabled: header write result checked; position returned by `FIO_SeekSkipFile(SEEK_END)` compared with `header_size + bytes_on_disk`; on any mismatch the file is left closed (valid up to that point) and the session stops writing. Write task stack is 0x1000 only when the toggle is on, 0x800 otherwise (the value every hardware run used). Not done: checkpoint on a time interval. |
+| 3 | Stop timeout closes the file and frees buffers under a running write | Fixed | On timeout the file is not closed and the crop buffers are not freed. `rvx_wedged` is set, `stopping` stays set (so the late task cannot start a checkpoint), and every later COMMAND_START is refused with a log line. Cost: the handle and about 32 MB stay allocated until reboot. |
+| 4 | `task_create` result ignored while `write_sem` is held | Fixed | Result checked (odd = error; `romdis 0xE05F40BA` shows returns 1/3/5 on failure and `handle << 1` on success). During recording: `write_sem` given back, buffer stays pending, retried. At stop: the worker writes the buffer itself. |
+| 5 | Short card write leaves a truncated block in the middle of the file | Fixed | First short write sets `rvx_write_failed`: later buffers are discarded instead of appended, incoming frames are counted in `rvx_dropped_nofile`, stop only rewrites the header and closes. The cut-off block is then the last thing in the file. Recording is not stopped automatically; the user has to stop. |
+| 6 | Frame counted when `edmac_sem` cannot be taken (= C1 B4) | Fixed | `edmac_sem` is taken before the VIDF header is written and before anything is counted; both early exits give it back. Dropped frames counted in `rvx_dropped_copy`. |
+| 7 | Unsynchronised reset of `frames` / `cur` | Fixed | Both fields are `volatile`, so the stores keep source order (`frames = 0` then `cur = start`). I did not disassemble to confirm. This is ordering on one core; it is not a lock. |
+| 8 | Stale comments, per-boot log limiters | Fixed | Comments corrected (`event_pusher.c` event ownership, header count on timeout). Limiters moved into one struct that is cleared on COMMAND_START. |
+| 9 | Observations on older code | Not changed, on purpose | (a) `take_semaphore(events_sem, 2000)` in the vsync callback; (b) `fio_malloc`/`fio_free` in the vsync callback; (c) two unused 4.3 MB capture buffers per session with the default toggles; (d) with `rvx_src_from_raw_info=0`, queued events can point at freed capture buffers. The reviewer asked for no change in this branch. (b) and (c) are part of the only recipe that has put frames on the card, and removing the allocation changes the memory picture during recording, so it should be a separate A/B on hardware. (d) only applies to a non-default toggle value. |
+
+### C1 writer bugs (each confirmed in source first)
+
+| # | Confirmed at (offline/C4 tip) | Status |
+|---|---|---|
+| B1 stop loses buffered frames | fixed by C4 `0530d6c7d` | Already fixed; host test and host MLV confirm |
+| B2 VIDF timestamp absolute | `mlv_3.c:725` `vidf_block.timestamp = get_us_clock();` while lines 468-583 subtract `session_start_timestamp` | Fixed in `ee73cef70`, same convention as `mlv_lite.c:2923` |
+| B3 crop/pan never copied | `start_mlv_session()` copied fps/res/alignment only; `worker.c` left the session fields 0 | Fixed. COMMAND_START now carries x,y (`MLV_3_CROP_X/Y` in `event_pusher.c`). Worker sets crop = `((x+7)&~7, y&~1)`, the position the copy really starts at, and pan = `(x, y)`, as mlv_lite does. |
+| B4 frame counted before semaphore take | `worker.c:490-494` | Fixed (finding 6) |
+| B5 `alloc_crop_bufs` end past the allocation | `worker.c:178,180` `end = start + buf_size` with `start` aligned up inside a `buf_size` block | Fixed: `end = start + buf_size - CROP_BUF_ALIGN`. Frames per buffer unchanged (5 at 1792x896). |
+| B6 stop races an in-flight write | normal path fixed by C4 `0530d6c7d`; timeout path still closed and freed (`worker.c:803,830`) | Fixed (finding 3) |
+
+### Tools added (existing tools left as they were)
+
+| Path | What |
+|---|---|
+| `tools/raw_vidx_hosttest_c10/` | Copy of C4's harness plus 7 tests: `flush_sem_timeout`, `write_task_create_fails`, `write_task_create_fails_at_stop`, `stop_timeout`, `short_write`, `checkpoint_bad_seek`, `copy_sem_busy`. Its `task_create` stub returns an even value on success, like DryOS. |
+| `tools/mlvcheck/host_writer_c10/` | Copy of C1's replay, updated to mirror the new worker (crop/pan offsets, usable buffer size, header count = frames on disk). |
+
+I first edited `tools/raw_vidx_hosttest/{harness.c,run.sh}` in place. I then restored both
+from a backup taken before the edit (`sim/C10/hosttest_orig`, `diff -rq` clean) and moved my
+changes into the `_c10` copy.
+
+## Results
+
+### Build
+
+```
+cd /mnt/data/WORK/eos/wt/C10/modules && make ARM_BINPATH=/usr/bin ARM_ABI=none-eabi            # rc=0
+cd /mnt/data/WORK/eos/wt/C10/platform/M50mk2.101 && make ARM_BINPATH=/usr/bin ARM_ABI=none-eabi # rc=0
+```
+
+**The first command is required.** The platform make alone does not refresh
+`modules/build/*.mo` once a module's `build/module_complete` marker exists, so it packed
+the previous `raw_vidx.mo` (25012 bytes, without these fixes) into `build/zip`. Only a make
+in `modules/` removes the markers. I hit this once; the staged card was built after both
+commands and its `raw_vidx.mo` md5 matches the module's own build directory.
+
+`raw_vidx.mo`: text 18991 (C4: 16998), bss 960, 27388 bytes, no warnings (`-Wall -Wextra -Werror`).
+`worker.c` is now 1088 lines, above the 800-line soft ceiling; not split.
+
+### Symbol gate
+
+```
+$ python3 tools/symgate/check_symbol_stability.py $B/M50mk2_101.sym --elf $B/magiclantern
+files are byte-identical
+added: 0   removed: 0   moved (ML core): 0   moved (ROM stubs >= 0xE0000000): 0
+    anchor raw_lv_redirect_edmac: 0xe5319 OK      anchor raw_info: 0x104434 OK
+    _text_end 0xf3328 OK   _bss_start 0x105a40 OK   _bss_end 0x14fc00 OK
+RESULT: PASS - every pre-existing symbol is at its baseline address
+
+$ python3 tools/symgate/check_module_syms.py $B/zip/ML/modules/*.mo $B/M50mk2_101.sym
+bench.mo         imports  76  cross-module  0  missing  0  ok
+file_man.mo      imports  47  cross-module  0  missing  0  ok
+raw_vidx.mo      imports  45  cross-module  0  missing  0  ok
+RESULT: PASS - 3 module(s), all imports resolvable
+```
+
+`raw_vidx.mo` imports the same 45 symbols as the `offline/C4` module (no new import).
+`nm -n magiclantern` hashes equal the main checkout's; `size` equal (219714 / 34577 / 261120).
+
+`autoexec.bin` (257696 bytes) against the main checkout's, 91 differing bytes:
+
+```
+0x55     '11-16' | '07-21'
+0x8f     '9633ac828 offline-integrate1' | '3ccf499dc walkback-milestone'
+0xbc     date/time
+0x18e20  C0 FC 9B (01) | 00 48 E8 (01)      27000000 | 32000000, the C4c timer base
+0x2bdc6  date, build_id, version strings
+0x33a9a, 0x3e8fb  date
+0x3ee9c  4-byte trailer
+```
+
+With the branch named `offline-integrate-1` (19 characters), same source:
+
+```
+moved (ML core): 53      0xf357e -> 0xf357f (+1) build_version, then +4, then +8
+_data_start 0xf54c8 -> 0xf54d0 (+8)  <-- CHANGED
+RESULT: FAIL
+```
+(`sim/C10/symgate_19char.txt`)
+
+### Host tests
+
+`sh tools/raw_vidx_hosttest_c10/run.sh wt/C10/modules/raw_video/raw_vidx sim/C10/hosttest`
+
+| Sources | Harness | Result |
+|---|---|---|
+| C10 | `_c10` (17 tests) | `failed tests: 0`, 124 checks ok (`sim/C10/hosttest_c10.log`) |
+| offline/C4 | `_c10` | 10 original tests pass, all 7 new tests fail (`sim/C10/hosttest_c4src.log`) |
+| C10 | original C4 harness (10 tests) | 9 pass; `slow_card` aborts with `harness: too many pending tasks` |
+
+The last row is a harness artefact, not a module failure: the original stub returns 1 from
+`task_create`, which the module now treats as "task not created" (as DryOS means it), so it
+retries a task the harness has already queued.
+
+New tests on the `offline/C4` sources, for example:
+
+```
+flush_sem_timeout   FAIL: 5 + 5 buffered + 3 after the semaphore came back = 13 frames, got 10
+stop_timeout        FAIL: file was not closed under the running write
+                    FAIL: both crop buffers still allocated (0 fio blocks live)
+short_write         FAIL: nothing appended after the failed write (35124064 -> 40743904 bytes)
+checkpoint_bad_seek FAIL: file on card is a well-formed block stream (header not overwritten)
+copy_sem_busy       FAIL: 3 copied frames in file (the 4th was dropped), got 4
+```
+
+### Host MLVs
+
+```
+bash tools/mlvcheck/host_writer_c10/build.sh /mnt/data/WORK/eos/wt/C10 /mnt/data/WORK/eos/sim/C10/mlv
+sim/C10/mlv/bin/rvx_host_mlv -i tools/mlserial/captures/first_raw_capture.raw -o <out> -n N -s flush|crash
+```
+
+| File (`sim/C10/mlv/out/`) | mlv_check | exit |
+|---|---|---|
+| `crop_clean_stop.mlv` (8 frames) | `8 complete VIDF, header declares 8`, tail clean, 0 errors, 1 warning (VERSION) | 0 |
+| `crop_clean_stop_13.mlv` (two buffer swaps) | `13 complete VIDF, header declares 13`, 0 errors | 0 |
+| `crop_short_3.mlv` (under one buffer) | 3 / 3, 0 errors | 0 |
+| `full_clean_stop.mlv` (2096x1164) | 5 / 5, 0 errors, crop=0,0 | 0 |
+| `crop_crash.mlv` (never closed) | `FRAME_COUNT_UNFINALISED` (0 declared, 10 present) | 1, 0 with `--crash-ok` |
+| `crop_crash_cut.mlv` | `TRUNCATED_BLOCK`, 9 complete + 1 cut | 1, 0 with `--crash-ok` |
+
+```
+    7 0x00000210 WBAL         44  0.063 ms
+    8 0x0000023c VIDF    2809984  33.436 ms    frame=0 space=96 payload=2809856 crop=200,100 pan=200,100
+    9 0x002ae2bc VIDF    2809984  66.809 ms    frame=1 space=96 payload=2809856 crop=200,100 pan=200,100
+```
+
+The `TIMESTAMP_ABSOLUTE` warning C1 reported is gone (C1's first frame was at 60033 ms).
+`--strict` still exits 1 because of the `v3.0` version-string warning, which C1 classed as
+not a bug. `mlv_dump -v` reports `Frames Video: 8`; `verify_image.py` on the clean-stop file
+and its 8 DNGs: all `IDENTICAL to reference`, `RESULT: OK`.
+
+### Staged card
+
+`/mnt/data/WORK/eos/sim/C10/card` (54 files, copy of `build/zip` plus `ML/SYMGATE.TXT`):
+
+```
+78f33748dcbbc6c8eadb882f4537d1ef  autoexec.bin            build_id '9633ac828 offline-integrate1'
+d2f46ba5e091fa02d53a8aae9969442f  ML/modules/M50mk2_101.sym
+0d80a5c15e9b2b7fbf881dfa3c925640  ML/modules/raw_vidx.mo
+cf46ff6ddca522b903e8473f5a758ae0  ML/modules/bench.mo
+f90a15fcf0496294153de6b57641f525  ML/modules/file_man.mo
+
+$ python3 tools/symgate/check_card_image.py sim/C10/card --elf $B/magiclantern
+  [ok]   sym filename matches the name embedded in autoexec.bin: M50mk2_101.sym
+  [ok]   address->file delta -0xc7788: load address 0xc78e0 maps to file offset 0x158
+  [ok]   version.c strings found exactly at the addresses the .sym claims
+  [ok]   prologue score 349/775 = 0.45 (best shifted control 0.09)
+  [ok]   card .sym is exactly the symbol table of .../build/magiclantern
+  [ok]   raw_vidx.mo: 45 imports resolvable
+  [ok]   manifest ML/SYMGATE.TXT: 5 file md5s match
+RESULT: PASS - .sym, autoexec.bin and modules are mutually consistent
+```
+
+The ELF, `autoexec.bin` and `.sym` of this build are also kept in `sim/C10/build_final/`.
+The stage holds no `ML/SETTINGS`; module enable state stays whatever is on the card.
+
+## Runtime toggles
+
+Set with `wr &<name> <value>` over the serial shell (resolve the address with `mlresolve`).
+
+| Toggle | Default | First hardware attempt | Meaning |
+|---|---|---|---|
+| `rvx_checkpoint` | 0 (was 1 on offline/C4) | **0** | 1 = after each full buffer rewrite header, close, reopen, seek to end. Never run on hardware. |
+| `rvx_wait_raw_job` | 1 | **1** | Poll Canon's raw-job ready flags before going ACTIVE. |
+| `rvx_src_from_raw_info` | 1 | **1** | Read frames from `UNCACHEABLE(raw_info.buffer)`. |
+| `rvx_redirect_edmac` | 0 | **0** | 1 = redirect Canon's LV raw EDMAC channel (caused the assert storm). |
+
+Read-only telemetry (`rd &<name>`), all reset at each start except `rvx_wedged`:
+
+| Name | Meaning |
+|---|---|
+| `rvx_dropped_queue` | Frames the vsync callback dropped (worker behind) |
+| `rvx_dropped_busy` | Frames dropped because both crop buffers were busy (card behind) |
+| `rvx_dropped_nofile` | Frames discarded after a failed write or with no open file (new) |
+| `rvx_dropped_copy` | Frames dropped because the previous copy held `edmac_sem` (new; expected 0) |
+| `rvx_write_failed` | 1 after a short card write or failed checkpoint in this session (new) |
+| `rvx_wedged` | 1 after a stop that timed out; recording refused until reboot (new) |
+
+Compile-time values that changed: `FLUSH_WRITE_WAIT_MS` 50 (was 1000), `TG_FREQ_BASE`
+27 MHz for M50mk2 (core). Unchanged: `WORKER_PRIO` 0x11, `WORKER_WRITE_PRIO` 0x1A,
+`STOP_WRITE_WAIT_MS` 10000, window 1792x896 at 200,100.
+
+## Limitations
+
+- Nothing ran on the camera. The host harness is single-threaded with no real timeouts, no
+  priorities and no Canon behaviour; it replaces `mlv_3.c` with a fake writer. The host MLV
+  writer uses the real `mlv_3.c` but a hand-written replay of the worker, not `worker.c`.
+- The 27 MHz timer base is a core change in a build whose layout is otherwise identical. It
+  changes what `fps_get_current_x1000()` returns (MLV header fps and every other user of
+  that function). Its effect on boot and LiveView is untested.
+- `task_create` failure detection relies on my reading of the ROM routine at 0xE05F40BA
+  (odd return = error). If that is wrong in some case, a successful creation would be
+  treated as a failure and the buffer written twice or the semaphore given twice.
+- The checkpoint seek check assumes `FIO_SeekSkipFile` returns the new position on this
+  firmware. If it does not, enabling `rvx_checkpoint` stops the recording at the first
+  checkpoint with a valid file and the log line `checkpoint seek-to-end landed elsewhere`.
+- After a short write the recording does not stop by itself, and the cut-off block stays
+  at the end of the file (readers need `--crash-ok`-style tolerance for the tail).
+- A wedged stop leaks the file handle and about 32 MB until reboot, and the file on the
+  card is not finalised.
+- Finding 7 is handled by `volatile` ordering only; the M50 II runs two cores and I did not
+  check which core the two tasks run on.
+- Finding 9 items are unchanged (see table).
+- The module md5 is not reproducible across builds (embedded build strings), so the md5s
+  above identify this staged build only.
+
+## Next hardware checks
+
+Lowest-risk order, since the new `raw_vidx.mo` resolves against the same `.sym` as the
+booting core:
+
+1. **Module only.** Keep the `autoexec.bin` and `.sym` already on the card; copy only
+   `sim/C10/card/ML/modules/raw_vidx.mo`. Remove `mlv_lite.mo` from the card (both claim the
+   record key). Confirm boot and module load.
+2. Short clip under 5 frames, stop: expect `MLV closed (finalized)` and `frames on disk=N`;
+   pull the card, `mlv_check.py tstNN.mlv -v` must show N frames, header N, timestamps
+   starting near 0, `crop=200,100 pan=200,100`.
+3. Clip over two buffers (more than 10 frames), stop: read `frames accepted`,
+   `dropped (queue full)`, `dropped (bufs busy)`. `WARN: could not start card write for full
+   buffer yet, will retry` should be absent or rare; if it appears, recording must continue.
+4. Two recordings in one boot: the second has frames and its own count.
+5. Check that none of these appear: `could not create raw_write task`, `card write did not
+   finish at stop`, `file not writable`. If `rvx_wedged` reads 1, the stop timed out.
+6. **Then the full staged card** (`autoexec.bin` with the 27 MHz base). Run
+   `check_card_image.py` on the mounted card first. Compare boot against step 1, and read
+   the MLVI fps of a new clip against the real frame rate (`fps from VIDF timestamps` in
+   `mlv_check`).
+7. Only after 2-4 pass: `wr &rvx_checkpoint 1`, record past two buffers. Look for
+   `checkpoint, frames on disk=`, compare the drop counters with step 3, check the file
+   size grows by `wbytes` per buffer, and watch for a `raw_write` stack assert.
+8. With checkpoints on, cut power mid-recording: the file should exist and decode to the
+   last checkpoint count.

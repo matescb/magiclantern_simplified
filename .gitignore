@@ -1,0 +1,22 @@
+# Workspace repo for the M50 Mark II Magic Lantern port.
+# Only docs/ and tools/ are versioned here. The firmware source lives in
+# magiclantern_simplified/ (its own repository, same fork); ROM dumps, the
+# Ghidra project, QEMU trees, worktrees and simulation output stay untracked.
+/*
+!/.gitignore
+!/docs/
+!/tools/
+
+# caches and assistant state
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.remember/
+.claude/
+
+# serial harness runtime state: UART logs and the log database (200 MB+)
+/tools/mlserial/run/
+
+# frames captured from the camera (images of the user's surroundings, 12 MB)
+/tools/mlserial/captures/
