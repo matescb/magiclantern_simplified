@@ -333,7 +333,7 @@ THUMB_FN(0xE08F993C,  PlayMovieGuideApp_handler)            // msg: "StartPlayMo
 // See R180 stubs.s for details.
 //DATA_PTR(  0xe708,  PlayMain_dialog)                      // in StartPlayMain()
 //DATA_PTR( 0x13fa4,  ShootOlcApp_dialog)                   // in StartShootOlcApp()
-DATA_PTR(   0x139b8,  LiveViewApp_dialog)                   // in StartLiveViewApp()
+DATA_PTR(    0xE9F0,  LiveViewApp_dialog)                   /* [M50II 1.0.1 OK, offline F7] was 0x139B8 (mk1; 0 literal hits). StartLiveViewApp 0xE0445864: r4=0xE9EC (literal 0xE0445B98); 0xE0445922 `str r0,[r4,#4]` stores the WINSYS_CreateDialogBox result. BEHAVIOUR CHANGE: see commit message. */
 //DATA_PTR( 0x1c434,  LiveViewShutterApp_dialog)            // in StartLiveViewShutterApp(), not sure if needed
 //DATA_PTR( 0x14fa8,  PlayMovieGuideApp_dialog)             // in StartPlayMovieGuideApp()
 
