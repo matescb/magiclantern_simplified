@@ -214,7 +214,12 @@ struct raw_info {
     int32_t color_matrix1[18];      // DNG Color Matrix
     int32_t dynamic_range;          // EV x100, from analyzing black level and noise (very close to DxO)
 };
+/* Host tools (mlv_dump, via lv_rec.h) include this header without compiler.h,
+ * where SIZE_CHECK_STRUCT is defined; they use raw_info_t below, not this
+ * struct, so the check only matters for camera code. */
+#ifdef SIZE_CHECK_STRUCT
 SIZE_CHECK_STRUCT(raw_info, 0xa0);
+#endif
 
 /* raw image info "raw_info_t" used for file IO on host pc tools */
 #if INTPTR_MAX != INT32_MAX
