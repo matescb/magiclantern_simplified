@@ -10,6 +10,7 @@
 #include "raw_vid_event_pusher.h"
 #include "mlv_3.h"
 #include "rvx_step1.h"
+#include "rvx_sync.h"
 
 static struct msg_queue *event_q = NULL;
 static FILE *raw_vid_fp = NULL;
@@ -557,6 +558,19 @@ static void worker(void)
             if (burst_done)
                 break; // burst complete, stop is on its way
 
+            // [M50 II] Event-container pool watchdog (F4): a cheap read-only check every
+            // rvx_pool_period frames.  Below the threshold no further frame is copied and the
+            // recording ends through the normal stop (hook removed, buffers written, file closed).
+            if (rvx_pool_frame_check())
+            {
+                SEND_LOG_DATA_STR("pool: free event containers below the stop threshold, ending the recording\n");
+                RVX_HEX("pool: level", (uint32_t)(rvx_pool_tripped - 1));
+                burst_done = 1; // frames still queued are discarded quietly, as after a burst
+                self_stop = 1;
+                block_recording();
+                break;
+            }
+
             if (event->src == NULL)
             {
                 SEND_LOG_DATA_STR("ERROR: event->src was NULL\n");
@@ -1003,6 +1017,11 @@ static void worker(void)
                                   session.crop_offset_y, session.fps);
                 if (burst_target != 0)
                     RVX_HEX("burst mode, frame target", burst_target);
+                // Last step of a start that can no longer fail: pool baseline, then the frame
+                // sync source (rvx_sync_src).  A refused install leaves Canon's memory untouched
+                // and the recording on the core's vsync hook.
+                rvx_pool_session_start();
+                rvx_sync_install();
                 recording_state = ACTIVE;
             }
             break;
@@ -1023,6 +1042,10 @@ static void worker(void)
                 // task that has not run yet).  Without this the file was closed under the
                 // write, and the buffer was freed below while FIO_WriteFile() still read it.
                 stopping = 1;
+
+                // [M50 II] Take our frame-sync hook out of Canon's memory first, before any card
+                // I/O and before raw_lv_release() lets Canon tear the raw path down.
+                rvx_sync_uninstall();
 
                 // [M50 II] Burst option rvx_burst_release_first: everything captured is in
                 // RAM, so raw LiveView can be given back to Canon BEFORE the card is touched;
@@ -1140,8 +1163,10 @@ static void worker(void)
                 if (rvx_dropped_copy)
                     RVX_HEX("dropped (copy busy)", rvx_dropped_copy);
 
+                rvx_sync_report();
                 stop_mlv_session();
                 recording_state = INACTIVE;
+                rvx_sync_session_end(); // the core's vsync callback drives the module again
                 SEND_LOG_DATA_STR("Recording is inactive\n");
             }
             // Sending a stop command sets prevent_recording in event_pusher.c, and only

@@ -4,7 +4,8 @@ MODULE_OBJS = $(BUILD_DIR)/raw_vid.o \
               $(BUILD_DIR)/worker.o \
               $(BUILD_DIR)/mlv_3.o \
               $(BUILD_DIR)/event_pusher.o \
-              $(BUILD_DIR)/rvx_step1.o
+              $(BUILD_DIR)/rvx_step1.o \
+              $(BUILD_DIR)/rvx_sync.o
 TOP_DIR = ../../..
 
 # include modules environment

@@ -14,6 +14,7 @@
 #include "raw_vid.h"
 #include "raw_vid_event_pusher.h"
 #include "raw_vid_worker.h"
+#include "rvx_sync.h"
 
 #if RAW_VID_Q_LEN < 5
     #error "RAW_VID_Q_LEN too short"
@@ -367,7 +368,9 @@ static unsigned int raw_vid_keypress_cbr(unsigned int key)
 
 // src/raw.c makes this fire every LV vsync (which I guess is tied to every sensor capture?).
 // In any case, it works to get 60fps captures on 200D.
-static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
+// [M50 II] The per-frame work.  Called from the core's vsync callback (rvx_sync_src = 0, in
+// Canon's EvfDev task) or from the "rvx_sync" task (sources 1 and 2, see rvx_sync.c).
+unsigned int FAST rvx_frame_tick(void)
 {
     static int count = 0; // frame count, reset every recording session
     struct raw_vid_event *event = NULL;
@@ -611,6 +614,26 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
 //ASSERT(frame_size_uncompressed % 4 == 0);
 
     return 0;
+}
+
+/* Core vsync callbacks ignored because the current recording runs on sync source 1 or 2.
+ * Compared with rvx_sync_ticks this gives the rate of both sources from one recording. */
+int rvx_sync_core_ignored = 0;
+
+static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
+{
+    if (rvx_sync_active)
+    {
+        // A module-installed source drives this recording; two sources must not both feed it.
+        rvx_sync_core_ignored++;
+        return 0;
+    }
+    return rvx_frame_tick();
+}
+
+void rvx_request_stop(void)
+{
+    task_create("stop_com", WORKER_PRIO + 1, 0x800, send_stop_command, NULL);
 }
 
 MODULE_CBRS_START()
