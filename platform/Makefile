@@ -581,6 +581,32 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 
 $(BUILD_DIR)/reboot.o: $(SRC_DIR)/reboot.c $(BUILD_DIR)/version.bin $(BUILD_DIR)/magiclantern.bin | $(BUILD_DIR)
 
+# Fixed-width version strings.
+#
+# version.o sits early in the link order, so everything in .rodata behind it
+# (and .rodata.str*, .data, .bss start) moves when one of these strings
+# changes length.  build_id = "<short hash> <branch>" made the core layout
+# depend on the *branch name length*; `date +%Z` and user@host are variable
+# too.  On M50mk2 a moved core layout has repeatedly meant a boot crash, and
+# modules resolved against a stale .sym crash at load.
+#
+# Each variable-length string is therefore emitted as a char array of fixed
+# size: shorter text is NUL padded, longer text is cut.  The default widths
+# equal the strings of the known-booting M50mk2.101 build ("3ccf499dc
+# walkback-milestone", "YYYY-mm-dd HH:MM:SS UTC", and its 39 character
+# user@host), so with the defaults the layout is byte-for-byte where it was.
+# Changing a width changes the layout once.
+#
+# version.bin (text embedded in the autoexec.bin loader in front of its code,
+# see reboot.c) gets the same two fields space padded / cut, so the loader
+# layout (load_ok, blob_start, cstart, ...) is length-stable as well.
+#
+# build_version is $(VERSION): fixed-width date + per-platform constants,
+# already length-stable for a given platform, so left as is.
+BUILD_ID_LEN   ?= 28
+BUILD_DATE_LEN ?= 23
+BUILD_USER_LEN ?= 39
+
 # include ML version, camera, firmware, some git info, build date
 # (this will need moving / updating for universal autoexec,
 # where per cam info makes no sense).
@@ -598,20 +624,21 @@ $(BUILD_DIR)/version.bin: FORCE | $(BUILD_DIR)
 	@echo 'Magic Lantern $(VERSION)' >> $@.tmp
 	@echo 'Camera   : $(MODEL)' >> $@.tmp
 	@echo 'Firmware : $(FW_VERSION)' >> $@.tmp
-	@printf 'Commit: ' >> $@.tmp
-	$(BUILD_TOOLS_DIR)/git_summary.py >> $@.tmp
-	@echo '' >> $@.tmp
-	@echo 'Built on : '`date -u "+%Y-%m-%d %H:%M:%S"`' by '`whoami`@`hostname` >> $@.tmp
+	@printf 'Commit: %-$(BUILD_ID_LEN).$(BUILD_ID_LEN)s\n' \
+	    "`$(BUILD_TOOLS_DIR)/git_summary.py`" >> $@.tmp
+	@printf 'Built on : %s by %-$(BUILD_USER_LEN).$(BUILD_USER_LEN)s\n' \
+	    "`date -u '+%Y-%m-%d %H:%M:%S'`" "`whoami`@`hostname`" >> $@.tmp
 	@echo '' >> $@.tmp
 	$(MV) $@.tmp $@
 
 $(BUILD_DIR)/version.c: FORCE | $(BUILD_DIR)
 	@echo "const char build_version[] = \"$(VERSION)\";" > $(BUILD_DIR)/version.tmp
-	@printf 'const char build_id[] = "' >> $(BUILD_DIR)/version.tmp
-	$(BUILD_TOOLS_DIR)/git_summary.py >> $(BUILD_DIR)/version.tmp
-	@echo '";' >> $(BUILD_DIR)/version.tmp
-	@echo 'const char build_date[] ="'`$(DATE) "+%Y-%m-%d %H:%M:%S %Z"`'";' >> $(BUILD_DIR)/version.tmp
-	@echo 'const char build_user[] = "'`whoami`@`hostname`'";'  >> $(BUILD_DIR)/version.tmp
+	@printf 'const char build_id[$(BUILD_ID_LEN) + 1] = "%.$(BUILD_ID_LEN)s";\n' \
+	    "`$(BUILD_TOOLS_DIR)/git_summary.py`" >> $(BUILD_DIR)/version.tmp
+	@printf 'const char build_date[$(BUILD_DATE_LEN) + 1] = "%.$(BUILD_DATE_LEN)s";\n' \
+	    "`$(DATE) '+%Y-%m-%d %H:%M:%S %Z'`" >> $(BUILD_DIR)/version.tmp
+	@printf 'const char build_user[$(BUILD_USER_LEN) + 1] = "%.$(BUILD_USER_LEN)s";\n' \
+	    "`whoami`@`hostname`" >> $(BUILD_DIR)/version.tmp
 	mv $(BUILD_DIR)/version.tmp $@
 
 $(BUILD_DIR)/xor_chk: $(BUILD_TOOLS_DIR)/xor_chk.c | $(BUILD_DIR)
