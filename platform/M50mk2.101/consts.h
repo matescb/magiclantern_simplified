@@ -104,7 +104,17 @@
  * PropID 80040083 is also not referenced anywhere.
  * GUILockTask does DISP_MuteOnOSDLineVram() and DISP_MuteOnOSDPanelVram()
  * so maybe values stored by those two combined can be used instead. */
+/* [offline F7] The comment above is wrong for 1.0.1: the string
+ * "DispOperator_PropertyMasterSetDisplayTurnOffOn handle NULL" is at 0xE0778F90 and the function
+ * 0xE0778D14 stores its argument at 0xABB0+0x80+0x34 = 0xAC64 and prop_deliver()s it. Polarity:
+ * 0xE06B3FE4 does `movs r0,#1; bl 0xE0778D14; b.w 0xE05A1EC8` (TurnOnDisplay), so 1 = on.
+ * The initial RAM value is 0 and it is not known whether Canon writes 1 during a normal boot, so
+ * the RAM read is opt-in: build with -DM50II_DISPLAY_IS_ON_FROM_RAM after `rd 0xAC64` on hardware. */
+#ifdef M50II_DISPLAY_IS_ON_FROM_RAM
+#define DISPLAY_IS_ON               (*(int*)0xAC64)
+#else
 #define DISPLAY_IS_ON               1
+#endif
 
 /*
  * On M50 UYVY Image buffers are hardcoded to be (see VramRead e009ccd6):
