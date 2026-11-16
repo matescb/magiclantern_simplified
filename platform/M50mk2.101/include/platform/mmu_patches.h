@@ -70,6 +70,13 @@ int m50ii_exclusivity_on = 0;   /* [2026-07-18] DEFAULT OFF: the funcs[0] drop b
                                  * = stock funcs[0]); `wr &m50ii_exclusivity_on 1` re-enables for the
                                  * deep-fix work (SetGUIRequestMode floods EVF -- see docs/33). */
 
+/* [layout pad] sizes measured with tools/symgate against the a10b16c23 baseline. */
+asm(".equ M50II_PAD_TEXT, 224");
+asm(".pushsection .rodata.str1.1,\"aMS\",%progbits,1\n"
+    ".fill 263,1,0x58\n.byte 0\n"
+    ".popsection\n");
+uint32_t m50ii_layout_pad_data[6] __attribute__((used)) = {1, 1, 1, 1, 1, 1};
+
 void __attribute__((noreturn, noinline, naked, aligned(4)))
 hook_gui_funcs0_exclusivity(void)
 {
@@ -101,6 +108,10 @@ hook_gui_funcs0_exclusivity(void)
     "1:                                 \n"
         "movs   r0, #0                  \n"
         "bx     lr                      \n"
+        /* [layout pad] keeps every core symbol after patch_mmu.o at its walkback-milestone
+         * address now that the dead normal-code-patch block is compiled out. Never executed. */
+        ".ltorg                         \n"
+        ".space M50II_PAD_TEXT          \n"
     );
 }
 
