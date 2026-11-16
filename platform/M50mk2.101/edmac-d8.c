@@ -22,10 +22,10 @@
  */
 
 // mimic edmac-memcpy.c
-#ifndef CONFIG_EDMAC_MEMCPY_D8
-#include <dryos.h>
+#include <dryos.h> /* config-defines.h -> internals.h defines CONFIG_EDMAC_MEMCPY_D8 */
 #include <edmac.h>
 #include <arm-mcr.h>
+#ifdef CONFIG_EDMAC_MEMCPY_D8
 /*
  * EDMAC mem2mem copy
  */
