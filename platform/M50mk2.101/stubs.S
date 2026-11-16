@@ -217,7 +217,7 @@ THUMB_FN(0xE021DB7C,  gui_main_task)                        /* [M50II 1.0.1 OK] 
 THUMB_FN(0xE065A4FC,  dialog_redraw)                        /* [M50II 1.0.1 STUBBED OUT, offline F7] was 0xE054F3CA = literal pool (not code). Real function not found; 0xE065A4FC is a bare `bx lr`, so the call is a no-op instead of a crash. Candidate for the real one: 0xE05A094C (unverified). */
 THUMB_FN(0xE03FD182,  gui_massive_event_loop)               // various "GUICMD_"* strings
 THUMB_FN(0xE021DCB2,  gui_enqueue_message)                  // via string "warning! QueueLength=" and "GUI::GUI.c" in one function
-THUMB_FN(0xE065A4F2,  gui_init_end)                         /* [M50II 1.0.1 F7-fix] was 0xE065A4F4 (2 bytes into fn, at the `bne`); real entry 0xE065A4F2 = `cmp r0,#0`; verify_stubs.py flagged cond-branch-at-entry, via "EndGuiInit" string */
+THUMB_FN(0xE065A4FC,  gui_init_end)                         /* [M50II 1.0.1 STUBBED OUT, offline F7] was 0xE065A4F2 = unrelated fn `if (r0==0) 0xE06CF730(4)`; no "EndGuiInit" string in this ROM and Canon gui_main_task 0xE021DB7C does not call such a function. 0xE065A4FC is a bare `bx lr`. */
 DATA_PTR(    0x5428,  gui_main_struct)
 
 /*
