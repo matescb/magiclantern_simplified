@@ -9,6 +9,7 @@
 #include "raw_vid_worker.h"
 #include "raw_vid_event_pusher.h"
 #include "mlv_3.h"
+#include "rvx_step1.h"
 
 static struct msg_queue *event_q = NULL;
 static FILE *raw_vid_fp = NULL;
@@ -77,6 +78,15 @@ static uint32_t header_size = 0; // MLV lib returns real size here
 int rvx_checkpoint = 0;
 
 static enum recording_state recording_state = INACTIVE;
+
+// [M50 II] Burst mode (rvx_burst_frames, see rvx_step1.h): capture into RAM only, write after.
+// Worker-only state.  burst_target is latched on COMMAND_START; 0 = continuous recording.
+static uint32_t burst_target = 0;
+// The burst is complete (target reached or both RAM buffers full): frames still in the queue
+// are ignored and the worker runs its own stop.
+static int burst_done = 0;
+static int self_stop = 0;
+static struct raw_vid_event self_stop_event;
 
 /* [M50 II] Poll Canon's async raw-job "ready" flags after raw_lv_request() before consuming frames,
  * to avoid the intermittent MvRawProDs/RawPro/LvJob ring-overflow assert STORM. Default 1 (on).
@@ -441,7 +451,7 @@ static int start_flush(struct crop_buf *crop_buf, int wait_ms)
     if (err)
         return 1;
 
-    uint32_t ret = task_create("raw_write", WORKER_WRITE_PRIO, write_task_stack(),
+    uint32_t ret = task_create("raw_write", rvx_prio_clamp(rvx_write_prio), write_task_stack(),
                                write_buf_task, crop_buf);
     if (task_create_failed(ret))
     {
@@ -463,7 +473,7 @@ static int flush_buf_and_wait(struct crop_buf *crop_buf)
     if (crop_buf->start == NULL || crop_buf->cur == crop_buf->start)
         return 0; // nothing to write
 
-    uint32_t ret = task_create("raw_write", WORKER_WRITE_PRIO, write_task_stack(),
+    uint32_t ret = task_create("raw_write", rvx_prio_clamp(rvx_write_prio), write_task_stack(),
                                write_buf_task, crop_buf);
     if (task_create_failed(ret))
     {
@@ -513,7 +523,19 @@ static void worker(void)
     {
         int err = -1;
         struct raw_vid_event *event = NULL;
-        msg_queue_receive(event_q, &event, 0);
+        if (self_stop)
+        {
+            // Burst complete: handle a stop of our own before looking at the queue again.
+            // Frames already queued are discarded afterwards (recording is INACTIVE by then).
+            self_stop = 0;
+            memset(&self_stop_event, 0, sizeof(self_stop_event));
+            self_stop_event.type = COMMAND_STOP;
+            event = &self_stop_event;
+        }
+        else
+        {
+            msg_queue_receive(event_q, &event, 0);
+        }
 
         if (event == NULL)
         { // shouldn't happen, we only post valid events
@@ -526,9 +548,14 @@ static void worker(void)
         case IMAGE_DATA:
             if (recording_state != ACTIVE)
             {
-                SEND_LOG_DATA_STR("ERROR: trying to process frame while recording not ACTIVE\n");
+                // After a burst stopped itself, frames queued before the stop arrive here.
+                if (!burst_done)
+                    SEND_LOG_DATA_STR("ERROR: trying to process frame while recording not ACTIVE\n");
                 break;
             }
+
+            if (burst_done)
+                break; // burst complete, stop is on its way
 
             if (event->src == NULL)
             {
@@ -564,7 +591,8 @@ static void worker(void)
             // A full buffer is still waiting for its write task: try again, without
             // waiting.  (This is what was missing when one failed attempt left the
             // buffer full for the rest of the recording.)
-            if (pending_flush != NULL && start_flush(pending_flush, 0) == 0)
+            // (Not in burst mode: there the full buffer stays in RAM until the stop.)
+            if (burst_target == 0 && pending_flush != NULL && start_flush(pending_flush, 0) == 0)
                 pending_flush = NULL;
 
             if (event->size > crop_buf->end - crop_buf->start)
@@ -622,6 +650,19 @@ static void worker(void)
                 else
                     crop_buf = &crop_bufs[0];
 
+                if (crop_buf->cur != crop_buf->start && burst_target != 0)
+                {
+                    // Burst mode: both RAM buffers are full, so the burst ends here, short
+                    // of its target.  Stay on the newer buffer so the stop writes the two
+                    // in capture order.
+                    crop_buf = flush_src;
+                    SEND_LOG_DATA_STR("burst: RAM full before the frame target, stopping\n");
+                    burst_done = 1;
+                    self_stop = 1;
+                    block_recording();
+                    give_semaphore(edmac_sem);
+                    break;
+                }
                 if (crop_buf->cur != crop_buf->start)
                 {
                     // The other buffer is not free, so there is nowhere to put this
@@ -665,8 +706,9 @@ static void worker(void)
             #ifdef RAW_VID_LOG
             session_data_size += (dst - crop_buf->cur + event->size);
             #endif
-            // The frame is accepted.  The image data is copied below, in this same task,
-            // before the worker looks at another event.
+            // The frame is accepted.  The image data is copied below, before the worker
+            // looks at another event.
+            char *block_start = crop_buf->cur; // where this frame's VIDF header begins
             crop_buf->cur = dst + event->size;
             crop_buf->frames++;
             video_frame_count++;
@@ -682,7 +724,11 @@ static void worker(void)
                 // So wait only briefly, and if that is not enough keep the buffer as
                 // pending: the next frames retry, and COMMAND_STOP writes it otherwise.
                 pending_flush = flush_src;
-                if (start_flush(pending_flush, FLUSH_WRITE_WAIT_MS) == 0)
+                if (burst_target != 0)
+                {
+                    // burst mode: no card I/O during capture, the stop writes it
+                }
+                else if (start_flush(pending_flush, FLUSH_WRITE_WAIT_MS) == 0)
                     pending_flush = NULL;
                 else if (log_n.flush_wait < 5)
                 {
@@ -725,26 +771,45 @@ static void worker(void)
                 }
             }
 
-            // [M50 II raw_vidx] SYNCHRONOUS inline CPU crop-copy.
+            // [M50 II raw_vidx] CPU crop-copy, synchronous from the worker's point of view.
             // The async D8 cpu_copy worker behind edmac_copy_rectangle_cbr_start does NOT reliably
-            // fire its completion CBR on this cam, so edmac_sem never returns and every frame drops
-            // (the "couldn't take edmac_sem" -> "crop_buf NULL" flood). We run in the dedicated
-            // worker task (off the capture/vsync path), so a plain per-row memcpy here is safe and
-            // deterministic; release edmac_sem directly via edmac_cbr_w() when done. This also
-            // avoids the mem2mem EDMAC engine (DAF/EIS storm) and the core-side sync change (which
-            // shifts symbols and destabilises boot). src = UNCACHEABLE(raw_info.buffer) (Change C).
+            // fire its completion CBR on this cam, and the mem2mem EDMAC engine storms (DAF/EIS),
+            // so rows are copied with the CPU from UNCACHEABLE(raw_info.buffer) (Change C).
+            // Where it runs (this task, or an "rvx_copy" task at rvx_copy_prio), whether it
+            // pauses (rvx_copy_chunk_kb) and how it reads the source (rvx_fast_copy) is decided
+            // in rvx_step1.c; with every toggle at its default this is the same per-row memcpy
+            // in this task as before.  edmac_sem is released via edmac_cbr_w() when done.
             {
-                uint32_t sp    = raw_info.pitch;                                   // src stride
-                uint32_t dp    = (uint32_t)line_size;                              // dst stride
-                uint32_t sbase = (uint32_t)event->src
-                               + (uint32_t)((event->x + 7)/8*BPP)                  // src_x (bytes)
-                               + (uint32_t)((event->y/2*2)) * sp;                  // src_y * pitch
-                uint32_t dbase = (uint32_t)dst;
-                for (int row = 0; row < (int)event->h; row++)
-                    memcpy((void*)(dbase + (uint32_t)row * dp),
-                           (void*)(sbase + (uint32_t)row * sp),
-                           (uint32_t)line_size);
+                struct rvx_copy_job job = {
+                    .src = (uint32_t)event->src
+                         + (uint32_t)((event->x + 7)/8*BPP)                  // src_x (bytes)
+                         + (uint32_t)((event->y/2*2)) * raw_info.pitch,      // src_y * pitch
+                    .dst = (uint32_t)dst,
+                    .src_pitch = raw_info.pitch,
+                    .line_size = (uint32_t)line_size,
+                    .rows = event->h,
+                };
+                uint32_t flags = rvx_copy_frame(&job, event->vd_seq, event->t_us,
+                                                video_frame_count - 1);
+                if ((flags & RVX_REC_TORN) && rvx_drop_torn)
+                {
+                    // Canon wrote into the source while we copied: do not keep the frame.
+                    // Its VIDF block is the last thing in the buffer, so taking it back is
+                    // just moving cur.  (The MLV frame number it used stays unused.)
+                    crop_buf->cur = block_start;
+                    crop_buf->frames--;
+                    video_frame_count--;
+                    rvx_mark_last_dropped();
+                }
                 edmac_cbr_w(NULL); // adv_cleanup no-op on D8 + give_semaphore(edmac_sem)
+            }
+
+            if (burst_target != 0 && video_frame_count >= burst_target)
+            {
+                SEND_LOG_DATA_STR("burst: frame target reached, stopping\n");
+                burst_done = 1;
+                self_stop = 1;
+                block_recording(); // the vsync hook stops queueing frames at once
             }
 
             break;
@@ -806,6 +871,9 @@ static void worker(void)
                 video_frame_count = 0;
                 frames_on_disk = 0;
                 bytes_on_disk = 0;
+                burst_target = rvx_burst_frames > 0 ? (uint32_t)rvx_burst_frames : 0;
+                burst_done = 0;
+                self_stop = 0;
 
                 SEND_LOG_DATA_STR("worker: COMMAND_START -> raw_lv_request\n");
                 // Set LV to raw
@@ -931,6 +999,10 @@ static void worker(void)
                 send_log_data_str("Recording is active\n");
                 start_time = get_ms_clock();
                 #endif
+                rvx_session_start(session.res_x, session.res_y, session.crop_offset_x,
+                                  session.crop_offset_y, session.fps);
+                if (burst_target != 0)
+                    RVX_HEX("burst mode, frame target", burst_target);
                 recording_state = ACTIVE;
             }
             break;
@@ -951,6 +1023,20 @@ static void worker(void)
                 // task that has not run yet).  Without this the file was closed under the
                 // write, and the buffer was freed below while FIO_WriteFile() still read it.
                 stopping = 1;
+
+                // [M50 II] Burst option rvx_burst_release_first: everything captured is in
+                // RAM, so raw LiveView can be given back to Canon BEFORE the card is touched;
+                // the write then runs with Canon's raw job off.  The price: if this release
+                // faults (the EvfDevState teardown problem), nothing has reached the card yet.
+                // Default 0 keeps the order used so far (close first, release last).
+                int released_early = 0;
+                if (burst_target != 0 && rvx_burst_release_first)
+                {
+                    SEND_LOG_DATA_STR("burst: raw_lv_release before the card write\n");
+                    raw_lv_release();
+                    released_early = 1;
+                }
+
                 int have_write_sem = (take_semaphore(write_sem, STOP_WRITE_WAIT_MS) == 0);
 
                 // Step 2: write out what is still in the buffers.  Frames are accepted into
@@ -1005,13 +1091,29 @@ static void worker(void)
                         SEND_LOG_DATA_STR("worker: MLV was already closed by a failed checkpoint\n");
                     }
                     RVX_HEX("frames on disk", frames_on_disk);
+
+                    // Integrity summary, and with rvx_sidecar = 1 the per-frame records as a
+                    // second file.  Only here: the MLV is closed and no write task is running.
+                    extern int rvx_dropped_queue; // event_pusher.c
+                    struct rvx_session_counts counts = {
+                        .frames_stored = video_frame_count,
+                        .frames_on_disk = frames_on_disk,
+                        .dropped_queue = (uint32_t)rvx_dropped_queue,
+                        .dropped_busy = (uint32_t)rvx_dropped_busy,
+                        .dropped_nofile = (uint32_t)rvx_dropped_nofile,
+                        .dropped_copy = (uint32_t)rvx_dropped_copy,
+                    };
+                    rvx_session_report(mlv_name, &counts);
+
                     give_semaphore(write_sem);
                     stopping = 0;
                 }
+                rvx_session_end();
 
                 // restore LV away from raw. This ML asserts if not paired with raw_lv_request(),
                 // but is safe; on M50 II it may fault (EvfDevState) -- the file is already closed.
-                raw_lv_release();
+                if (!released_early)
+                    raw_lv_release();
                 // TODO mlv_lite does restore_bit_depth(), we don't mess with this yet.
 
                 #ifdef RAW_VID_LOG
@@ -1027,9 +1129,11 @@ static void worker(void)
                 if (!rvx_wedged)
                     free_crop_bufs(crop_bufs);
 
-                extern int rvx_dropped_queue; // event_pusher.c
                 RVX_HEX("frames accepted", video_frame_count);
-                RVX_HEX("dropped (queue full)", rvx_dropped_queue);
+                {
+                    extern int rvx_dropped_queue; // event_pusher.c
+                    RVX_HEX("dropped (queue full)", rvx_dropped_queue);
+                }
                 RVX_HEX("dropped (bufs busy)", rvx_dropped_busy);
                 if (rvx_dropped_nofile)
                     RVX_HEX("discarded (file not writable)", rvx_dropped_nofile);
@@ -1083,6 +1187,8 @@ void init_worker(struct msg_queue *q)
         SEND_LOG_DATA_STR("ERROR: worker could not create write sem\n");
         return;
     }
+    if (rvx_step1_init())
+        SEND_LOG_DATA_STR("WARN: no copy-task semaphore, rvx_copy_prio will be ignored\n");
     task_create("raw_v_worker", WORKER_PRIO, 0x1000, worker, NULL);
     allow_recording();
 }

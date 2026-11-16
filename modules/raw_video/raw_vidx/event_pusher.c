@@ -67,6 +67,26 @@ int rvx_redirect_edmac = 0;
  * first frame; logged by the worker at stop. Read-only telemetry: `rd &rvx_dropped_queue`. */
 int rvx_dropped_queue = 0;
 
+/* [M50 II] Recorded window, runtime-selectable.  Defaults = the former compile-time values.
+ * Read when REC starts a recording and fixed for that recording.  Width must be a multiple of
+ * 8 pixels (whole 14-byte groups), height even; a window that does not fit the raw frame stops
+ * the recording on its first vsync.  A13: with x = 200 every source row starts 2 bytes off a
+ * word boundary and memcpy runs its byte loop; `wr &rvx_crop_x 192` avoids that.
+ * The plan's first clip: `wr &rvx_crop_w 1280`, `wr &rvx_crop_h 720`, `wr &rvx_crop_x 192`. */
+int rvx_crop_w = MLV_3_CROP_WIDTH;
+int rvx_crop_h = MLV_3_CROP_HEIGHT;
+int rvx_crop_x = MLV_3_CROP_X;
+int rvx_crop_y = MLV_3_CROP_Y;
+
+/* Vsync hooks seen while the current / most recent session was active, whether or not the
+ * frame was queued.  Each IMAGE_DATA event carries the value at its vsync, so frames that were
+ * never copied show up as gaps.  Read-only telemetry. */
+volatile uint32_t rvx_vsyncs = 0;
+
+// Window of the session in progress, latched from rvx_crop_* by the REC key.
+static uint32_t sess_w = MLV_3_CROP_WIDTH, sess_h = MLV_3_CROP_HEIGHT;
+static uint32_t sess_x = MLV_3_CROP_X, sess_y = MLV_3_CROP_Y;
+
 static struct msg_queue *event_q = NULL;
 
 // We post these events to the msg queue.  Since we push a pointer,
@@ -176,6 +196,11 @@ void allow_recording(void)
 {
     session_reset_pending = 1;
     prevent_recording = 0;
+}
+
+void block_recording(void)
+{
+    prevent_recording = 1;
 }
 
 void init_event_pusher(struct msg_queue *q)
@@ -306,11 +331,22 @@ static unsigned int raw_vid_keypress_cbr(unsigned int key)
                 event->creation_time = get_ms_clock();
                 event->type = COMMAND_START;
                 // FIXME we should take these from menu config when we have that
-                event->w = MLV_3_CROP_WIDTH;
-                event->h = MLV_3_CROP_HEIGHT;
+                if (rvx_crop_w < 64 || rvx_crop_h < 16 || rvx_crop_x < 0 || rvx_crop_y < 0
+                    || (rvx_crop_w & 7) || (rvx_crop_h & 1))
+                {
+                    SEND_LOG_DATA_STR("ERROR: rvx_crop_w/h/x/y not usable (w multiple of 8, h even), not starting\n");
+                    release_event(event);
+                    return 0;
+                }
+                sess_w = (uint32_t)rvx_crop_w;
+                sess_h = (uint32_t)rvx_crop_h;
+                sess_x = (uint32_t)rvx_crop_x;
+                sess_y = (uint32_t)rvx_crop_y;
+                event->w = sess_w;
+                event->h = sess_h;
                 // so the worker can put the window position into the MLV frame headers
-                event->x = MLV_3_CROP_X;
-                event->y = MLV_3_CROP_Y;
+                event->x = sess_x;
+                event->y = sess_y;
                 msg_queue_post(event_q, (uint32_t)event);
                 SEND_LOG_DATA_STR("posted COMMAND_START\n");
             }
@@ -401,6 +437,27 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
     { // per recording-session setup
         SEND_LOG_DATA_STR("Video starting.\n");
         rvx_dropped_queue = 0;
+        rvx_vsyncs = 0;
+
+        // The window must lie inside the raw frame, or the worker would copy from beyond
+        // Canon's buffer.  (x is rounded up to 8, as the worker does.)
+        if (((sess_x + 7) & ~7u) + sess_w > (uint32_t)raw_info.width
+            || sess_y + sess_h > (uint32_t)raw_info.height)
+        {
+            SEND_LOG_DATA_STR("ERROR: recording window does not fit the raw frame, stopping\n");
+            prevent_recording = 1; // at once; the stop task below only runs later
+            task_create("stop_com", WORKER_PRIO + 1, 0x800, send_stop_command, NULL);
+            return 0;
+        }
+    }
+    rvx_vsyncs++;
+
+    // [M50 II] The two full-frame capture buffers (2 x 4.3 MB) are only used when frames are
+    // not read from raw_info.buffer or when the EDMAC redirect is on.  With the defaults
+    // neither is the case, so do not take 8.5 MB out of the pool Canon's LiveView shares (A8),
+    // and do not call the allocator from the vsync hook, when nothing will use the memory.
+    if (count == 1 && (!rvx_src_from_raw_info || rvx_redirect_edmac))
+    {
 
         // We lie a little to increase height, we want to slightly over-allocate.
         // Old code does this, not quite sure why, perhaps DMA block size related?
@@ -441,6 +498,10 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
 
         frame = capture_frames[0];
     }
+    else if (count == 1)
+    {
+        frame = NULL; // nothing allocated; a pointer left from an earlier session is stale
+    }
 
     event = get_empty_event();
     if (event == NULL)
@@ -462,10 +523,12 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
 
     event->orig_frame_width = raw_info.pitch;
 
-    event->x = MLV_3_CROP_X; // x offset within the frame, for cropping
-    event->y = MLV_3_CROP_Y; // y as above
-    event->w = MLV_3_CROP_WIDTH;
-    event->h = MLV_3_CROP_HEIGHT;
+    event->x = sess_x; // x offset within the frame, for cropping
+    event->y = sess_y; // y as above
+    event->w = sess_w;
+    event->h = sess_h;
+    event->vd_seq = rvx_vsyncs;
+    event->t_us = (uint32_t)get_us_clock();
 
     int32_t frame_size = event->w * event->h * BPP/8;
     event->size = frame_size;

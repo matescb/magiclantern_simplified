@@ -57,6 +57,9 @@ struct raw_vid_event
     uint32_t h; // our crop height
 
     int32_t size; // size calculated by producer, in bytes
+
+    uint32_t vd_seq; // IMAGE_DATA: number of the vsync within the session (counts every vsync)
+    uint32_t t_us;   // IMAGE_DATA: get_us_clock() low 32 bits, taken in the vsync hook
 };
 
 enum recording_state

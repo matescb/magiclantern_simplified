@@ -6,5 +6,7 @@
 void init_event_pusher(struct msg_queue *event_q);
 void release_event(struct raw_vid_event *event);
 void allow_recording(void);
+// Worker only: make the vsync hook stop queueing frames now (undone by allow_recording()).
+void block_recording(void);
 
 #endif // _raw_vid_pusher_h_
