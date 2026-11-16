@@ -71,7 +71,7 @@ DATA_PTR(   0x11294,  bmp_vram_info)                        /* [M50II 1.0.1 mayb
 THUMB_FN(0xE05D10C4,  DryosDebugMsg)                        /* [M50II 1.0.1 OK] (class,level,fmt,...); push{r0-r3} va_list; found via SleepTime(%d) call site */
 
 /** Dumper **/
-THUMB_FN(0xe00db9e6,  dump_file)                            // shouldn't be used, gone from newer models
+THUMB_FN(0xE065FE58,  dump_file)                            /* [M50II 1.0.1 OK, offline F7] was 0xE00DB9E6 (mid-function). (name r0, addr r1, size r2); "A:/%s" @0xE065FF34; Remove/Create/Write/Close/Flush; 0x18-byte path buffer: keep names short */
 
 /** Eventprocs (call by name) **/
 THUMB_FN(0xE05CBF82,  call)                                 /* [M50II 1.0.1 matched] eventproc-by-name executor: table load -> name lookup bl 0xE02EAF36 -> blx execute; verify */
