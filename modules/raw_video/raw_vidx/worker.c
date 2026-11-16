@@ -781,6 +781,13 @@ static void worker(void)
                 recording_state = INACTIVE;
                 SEND_LOG_DATA_STR("Recording is inactive\n");
             }
+            // Sending a stop command sets prevent_recording in event_pusher.c, and only
+            // we may clear it.  Nothing did, so after the first stop the vsync CBR
+            // returned early for the rest of the boot: every later recording started,
+            // captured no frames and produced a header-only file.
+            // By now every IMAGE_DATA event queued ahead of this stop has been consumed.
+            // Done for every stop command, also one that arrived while not recording.
+            allow_recording();
             break;
 
         case EMPTY:

@@ -79,6 +79,10 @@ static struct semaphore *events_sem = NULL;
 // flushes any queued events before making that change.
 static int prevent_recording = 1;
 
+// Set by allow_recording(), consumed by the vsync CBR: the next frame it handles
+// is the first frame of a new session, whatever its frame counter says.
+static int session_reset_pending = 0;
+
 static void send_stop_command(void); // forward declaration
 
 // Returns a raw_vid_event in the PREPARING state,
@@ -157,8 +161,10 @@ void release_event(struct raw_vid_event *event)
 
 // This should only be called by worker.c,
 // when it wishes to allow this file to start a new recording.
+// The worker calls it at init and after it has handled each COMMAND_STOP.
 void allow_recording(void)
 {
+    session_reset_pending = 1;
     prevent_recording = 0;
 }
 
@@ -360,6 +366,15 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
         return 0;
     }
 
+    if (session_reset_pending)
+    {
+        // Normally the branch above has already reset count while the worker was
+        // busy stopping.  If the worker finished the stop between two vsyncs we
+        // never saw that state, so do not rely on it.
+        session_reset_pending = 0;
+        count = 0;
+    }
+
     // In worker.c we request LV changes to raw mode, which takes some time.
     // When it occurs, raw_info global struct gets updated with the raw dimensions.
     if (raw_info.width == 0
@@ -377,6 +392,18 @@ static unsigned int FAST raw_vid_vsync_cbr(unsigned int unused)
         // We lie a little to increase height, we want to slightly over-allocate.
         // Old code does this, not quite sure why, perhaps DMA block size related?
         const uint32_t lv_raw_size = raw_info.width * (raw_info.height + 2) * BPP/8;
+        // Free leftovers of a session whose stop we never observed (see above),
+        // so they are not leaked and the size matches the current raw_info.
+        if (capture_frames[0] != NULL)
+        {
+            fio_free(capture_frames[0]);
+            capture_frames[0] = NULL;
+        }
+        if (capture_frames[1] != NULL)
+        {
+            fio_free(capture_frames[1]);
+            capture_frames[1] = NULL;
+        }
         capture_frames[0] = fio_malloc(lv_raw_size);
 
         if (capture_frames[0] == NULL)
