@@ -1,5 +1,7 @@
 # Module names in this file will be included in the cam magiclantern.zip
 bench
 file_man
-mlv_lite
+# mlv_lite: not shipped for now. raw_vidx is the active recorder on this body; both
+# claim the record key and mlv_lite still carries diagnostic writes. Build/stage it by hand
+# (modules/raw_video/mlv_lite) for A/B tests only, never together with raw_vidx.
 raw_vidx
