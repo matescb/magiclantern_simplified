@@ -86,7 +86,10 @@
  * variable to represent currently display overlays. Look at R conts.h for more
  * details.
  */
-#define LV_OVERLAYS_MODE MEM(0x13CC8)
+/* [M50II 1.0.1 OK, offline F7] was MEM(0x13CC8) (mk1; 0 literal hits in this ROM).
+ * LvInfoToggle_Update 0xE0709C8C: `ldr r5,=0x15998; ldr r6,[r5]`; literal 0x15998 occurs only at
+ * 0xE0709BB4 / 0xE0709FBC. Boot log shows 'LvInfoToggle_Initialize ToggleIndex:3'. */
+#define LV_OVERLAYS_MODE MEM(0x15998)
 
 /* [RAW-VIDEO R2, docs/31 + docs/30] DIGIC 8 raw LiveView registers.
  * RAW_LV_EDMAC_CHANNEL_ADDR: write-EDMAC channel MMIO Canon fills after lv_save_raw(1);
