@@ -1073,6 +1073,19 @@ int raw_update_params_work()
         skip_left   = 88;
         #endif
 
+        #if defined(CONFIG_M50mk2) && defined(M50II_RAW_SKIP_FROM_CANON_TABLE)
+        /* [offline F7] Opt-in. Canon's LV raw geometry table (records of 11 words from
+         * 0xE1359338) has for 2096x1164 the record at 0xE13593E8 = 2096,1164,1,92,38,2000,1126
+         * (left 92, top 38, active 2000x1126). 88/34 are the values of the 838/714-line
+         * records and of M50 mk1; they gave a correct image on hardware, so they stay the
+         * default. Whether the table fields are the optical-black edge is not shown by the ROM. */
+        if (width == 2096 && height == 1164)
+        {
+            skip_top    = 38;
+            skip_left   = 92;
+        }
+        #endif
+
         dbg_printf("LV raw buffer: %x (%dx%d)\n", raw_info.buffer, width, height);
         dbg_printf("Skip left:%d right:%d top:%d bottom:%d\n", skip_left, skip_right, skip_top, skip_bottom);
 #endif
