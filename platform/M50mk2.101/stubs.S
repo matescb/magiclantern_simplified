@@ -92,7 +92,10 @@ THUMB_FN(0xE05C066A,  CancelTimer)                          /* [M50II 1.0.1 OK] 
  * target *bitmask* by a wrapper before this primitive. */
 THUMB_FN(0xE00D4034,  send_software_interrupt) // int 10 is used by DryOS to sleep/wake cpu1
 
-THUMB_FN(0xdf002c32, _request_RPC) // allows CPU0 or CPU1 to pass a func pointer and param
+/* [M50II 1.0.1 LIKELY, offline F7] was 0xDF002C32 = ROM 0xE14999D6 = second half of the 4-byte
+ * `dmb sy` at 0xE14999D4. Blob copy: src 0xE14995A4 -> 0xDF002800..0xDF0033A0 ([0xE00400EC..F4]).
+ * ROM 0xE14999EE: push {r4,r5,r6,lr}; irq-save; bl 0xE1499876(r0,r1); irq-restore. No string anchor. */
+THUMB_FN(0xDF002C4A, _request_RPC) // allows CPU0 or CPU1 to pass a func pointer and param
                                    // to the other for RPC.
                                    // Passing a NULL func pointer, will suspend the other
                                    // CPU until it becomes non-NULL.
@@ -105,7 +108,7 @@ THUMB_FN(0xdf002c32, _request_RPC) // allows CPU0 or CPU1 to pass a func pointer
                                    // as fast as possible, forever.
                                    // Instead use request_RPC().
 
-THUMB_FN(0xdf002c52,  clear_RPC_request) // reset the request to prevent calling
+THUMB_FN(0xDF002C6A,  clear_RPC_request) /* was 0xDF002C52 (mid-body); ROM 0xE1499A0E: push {r4,lr}; irq-save; bl 0xE149999A; irq-restore; return 0 */ // reset the request to prevent calling
                                          // the function forever
 
 // MMU related, required by CONFIG_MMU features
