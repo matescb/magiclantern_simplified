@@ -331,6 +331,45 @@ static camera_id_t camera_id[] = {
         { 3456000, 595 },
         2
     },
+	/*
+	    PROVISIONAL entries for the DIGIC 8 EOS M50 family (not obtained with the
+	    procedure in the NOTE above; no CR3/DNG pair was available):
+
+	    - The matrix is the one already used for these bodies in src/raw.c
+	      (CAM_COLORMATRIX1 for CONFIG_M50 || CONFIG_M50mk2), i.e. LibRaw's
+	      "EOS M50" entry, a D65 matrix.  It is used for BOTH ColorMatrix1
+	      (which should be the Standard Light A matrix) and ColorMatrix2 (D65,
+	      the one the Kelvin -> AsShotNeutral conversion uses).  The M50 Mark II
+	      reuses the M50 matrix, as raw.c does; not verified for that sensor.
+	    - ForwardMatrix1/2 are unknown: left zero, dng.c omits the tags then.
+	    - Focal plane resolution is unknown: left zero, as for unlisted cameras.
+
+	    Model IDs: 0x80000412 = M50 (K412), 0x80000468 = M50 Mark II (K468,
+	    FIRMWARE_ID in platform/M50mk2.101/Makefile, read from the 1.0.1 ROM).
+	    Replace with exiftool values from a real CR3 -> DNG when available.
+	*/
+	{
+		0x80000412,
+		{ "Canon EOS M50", NULL, "Canon EOS Kiss M" },
+		{ 8532, 10000, -701, 10000, -1167, 10000, -4095, 10000, 11879, 10000, 2508, 10000, -797, 10000, 2424, 10000, 7010, 10000 },
+        { 8532, 10000, -701, 10000, -1167, 10000, -4095, 10000, 11879, 10000, 2508, 10000, -797, 10000, 2424, 10000, 7010, 10000 },
+        { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0 },
+        { 0, 0 },
+        0
+    },
+	{
+		0x80000468,
+		{ "Canon EOS M50 Mark II", NULL, "Canon EOS Kiss M2" },
+		{ 8532, 10000, -701, 10000, -1167, 10000, -4095, 10000, 11879, 10000, 2508, 10000, -797, 10000, 2424, 10000, 7010, 10000 },
+        { 8532, 10000, -701, 10000, -1167, 10000, -4095, 10000, 11879, 10000, 2508, 10000, -797, 10000, 2424, 10000, 7010, 10000 },
+        { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0 },
+        { 0, 0 },
+        0
+    },
 	{ 
 		0x00000000,
 		{ NULL, NULL, NULL },

@@ -700,6 +700,13 @@ static void dng_fill_header(struct frame_info * frame_info, struct dng_data * dn
             IFD0[36].tag = tcDNGPrivateData; /* tcForwardMatrix2 */
         }
         
+        /* database entry without forward matrices (zero denominators, e.g. provisional entries): omit the tags */
+        else if(camera_id[current_cam].ForwardMatrix1[1] == 0 || camera_id[current_cam].ForwardMatrix2[1] == 0)
+        {
+            IFD0[35].tag = tcDNGPrivateData; /* tcForwardMatrix1 */
+            IFD0[36].tag = tcDNGPrivateData; /* tcForwardMatrix2 */
+        }
+        
         /* update the StripOffsets to the correct location
            the image data starts where our extra data ends */
         IFD0[9].value = data_offset;
