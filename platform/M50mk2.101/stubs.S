@@ -348,6 +348,15 @@ THUMB_FN(0xE05A1B70,  DISP_GetImageAddress)                 /* [M50II 1.0.1 OK] 
 THUMB_FN(0xE05A1794,  DISP_SetUpdateOSDVram)                /* [M50II 1.0.1 OK] DISP module; precedes bmp_vram_info use */
 //THUMB_FN(0xE03FF1D8, GUI_ChangeMode)                      /* [M50II 1.0.1 OK] ctrlman GUI_ChangeMode; enable if needed */
 
+/** Offline sprint additions (F7, from A14c) - new symbols, no ML code calls them yet **/
+THUMB_FN(0xE0674574,  debug_assert)                         /* (msg, file, line); every Canon assert site does `bl 0xE0674574` */
+THUMB_FN(0xE05D1478,  dm_set_print_level)                   /* (class, level); asserts *(0x5154); 'dmprint' evproc tail-calls it */
+THUMB_FN(0xE05D14BE,  dm_set_store_level)                   /* (class, level); same shape, +0x46; 'dmstore' evproc */
+THUMB_FN(0xE05BE5A2,  DeleteResLockEntry)                   /* (entry); sig check vs [0xB0F0+4] -> 7; state==2 (locked) -> 0xD; else frees [entry+0x14] and entry. CreateResLockEntry+0xE4 */
+THUMB_FN(0xE0608794,  LoadCalendarFromRTC_canon)            /* (struct tm *) thunk: r3=tm, r1=0x10, r0=r2=0, b.w 0xE0607F62 (Device::RTC.c). Blocks up to 1 s on a semaphore, asserts on timeout: task context only. NOT the 200D/R _LoadCalendarFromRTC(tm,0,0,16) argument order. */
+THUMB_FN(0xE05A1EC8,  _turn_on_display)                     /* DebugMsg(0x3C,3,"TurnOnDisplay" 0xE05A2234); lock; bl 0xE0086BFC */
+THUMB_FN(0xE05A1EF2,  _turn_off_display)                    /* DebugMsg(0x3C,3,"TurnOffDisplay" 0xE05A2244); lock; bl 0xE0086C2E */
+
 /**
  * Foundations RE sweep (F1-F6, 2026-07-07) — all entries independently romdis-verified
  * (valid prologue) AND adversarially verified; see docs/13/14/15. New/additive only.
