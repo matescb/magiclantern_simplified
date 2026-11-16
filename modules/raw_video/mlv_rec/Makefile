@@ -172,6 +172,10 @@ $(LZMA_LIB_MINGW): $(LZMA_OBJS_MINGW)
 #
 mlv_dump.c: $(BUILD_DIR)/module_strings.h
 
+# host tool, not part of the module build: "make mlv_dump" -> build/mlv_dump
+.PHONY: mlv_dump
+mlv_dump: $(BUILD_DIR)/mlv_dump
+
 $(BUILD_DIR)/mlv_dump: $(MLV_DUMP_OBJS)
 	@mkdir -p $(BUILD_DIR)/dng
 	@mkdir -p $(BUILD_DIR)/$(RAW_PROC_DIR)
