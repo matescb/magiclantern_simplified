@@ -28,6 +28,26 @@ static struct semaphore *write_sem = NULL;
 // accepted into the buffers, is what goes into the MLV file header.
 static uint32_t frames_on_disk = 0;
 
+// Set by the worker while it handles COMMAND_STOP.
+static int stopping = 0;
+
+// MLV file name and in-memory copy of the file headers for the current session.
+// Written by the worker in COMMAND_START (before any "raw_write" task exists);
+// after that only touched by whoever holds write_sem.
+static char mlv_name[20] = {0};
+static char *header_buf = NULL;
+static uint32_t header_size = 0; // MLV lib returns real size here
+
+/* [M50 II] Crash-safe checkpoints. After each full buffer has been written, rewrite the header
+ * with the number of frames now in the file, CLOSE the file and reopen it for append.
+ * Why: on this camera a recording can wedge (assert storm / EvfDevState flood) before
+ * COMMAND_STOP runs. FIO_CloseFile is what commits the directory entry and FAT chain; the first
+ * clip that reached the card on HW (boot 212, 13.4 MB written) vanished completely after the
+ * power-cycle because the file was never closed. With checkpoints a wedge costs at most the
+ * frames since the last full buffer. Cost: one close + open per buffer (~16 MB).
+ * Default 1. Runtime A/B: `wr &rvx_checkpoint 0` restores the single close at stop. */
+int rvx_checkpoint = 1;
+
 static enum recording_state recording_state = INACTIVE;
 
 /* [M50 II] Poll Canon's async raw-job "ready" flags after raw_lv_request() before consuming frames,
@@ -266,11 +286,47 @@ static void write_buf(struct crop_buf *crop_buf)
     crop_buf->cur = crop_buf->start;
 }
 
+// Makes the file on the card complete and self-consistent as of now: header with the
+// current frame count, closed, then reopened with the position at the end so recording
+// carries on.  Caller must hold write_sem.
+static void checkpoint_file(void)
+{
+    if (raw_vid_fp == NULL || header_buf == NULL || header_size == 0)
+        return;
+
+    if (update_video_frame_count(frames_on_disk, header_buf, header_buf + header_size))
+        return;
+    FIO_SeekSkipFile(raw_vid_fp, 0, SEEK_SET);
+    FIO_WriteFile(raw_vid_fp, header_buf, header_size);
+    FIO_CloseFile(raw_vid_fp);
+
+    // Same way src/fio-ml.c FIO_CreateFileOrAppend() reopens a file for appending.
+    // We must not fall back to FIO_CreateFile() as that does: it would truncate.
+    // raw_vid_fp is only reassigned once the new handle is ready; nobody else may
+    // use it meanwhile, as we hold write_sem.
+    FILE *fp = FIO_OpenFile(mlv_name, O_RDWR | O_SYNC);
+    if (fp == NULL)
+    {
+        // What is on the card is a valid file; we just cannot add to it.
+        SEND_LOG_DATA_STR("ERROR: checkpoint could not reopen mlv, recording cannot continue\n");
+        raw_vid_fp = NULL;
+        return;
+    }
+    FIO_SeekSkipFile(fp, 0, SEEK_END);
+    raw_vid_fp = fp;
+
+    static int ckpt_log_n = 0;
+    if (ckpt_log_n < 3) { RVX_HEX("checkpoint, frames on disk", frames_on_disk); ckpt_log_n++; }
+}
+
 // Entry point of the "raw_write" task.  The worker took write_sem on our behalf
 // before creating the task; we give it back when the write is finished.
 static void write_buf_task(struct crop_buf *crop_buf)
 {
     write_buf(crop_buf);
+    // Not while stopping: COMMAND_STOP finalises and closes right after this anyway.
+    if (rvx_checkpoint && recording_state == ACTIVE && !stopping)
+        checkpoint_file();
     give_semaphore(write_sem);
 }
 
@@ -303,16 +359,13 @@ static void worker(void)
     uint32_t session_data_size = 0;
     #endif
 
-    char mlv_name[20] = {0};
-
     struct crop_buf crop_bufs[2] = {NULL};
     struct crop_buf *crop_buf = NULL;
     uint32_t video_frame_count = 0;
 
-    char *header_buf = NULL; // space for MLV file header
+    // space for MLV file header
     const uint32_t header_buf_size = 1024; // wants to be big enough for combined headers,
                                            // this file shouldn't know their size, it's okay to just guess.
-    uint32_t header_size = 0; // MLV lib returns real size here
     header_buf = malloc(header_buf_size);
     if (header_buf == NULL)
     {
@@ -349,7 +402,9 @@ static void worker(void)
 
             if (raw_vid_fp == NULL)
             {
-                SEND_LOG_DATA_STR("ERROR: fp was NULL at attempt to write\n");
+                // Rate-limited: this repeats for every frame once the file is gone.
+                static int fpnull_n = 0;
+                if (fpnull_n < 5) { SEND_LOG_DATA_STR("ERROR: fp was NULL at attempt to write\n"); fpnull_n++; }
                 break;
             }
 
@@ -707,6 +762,7 @@ static void worker(void)
                 // Step 1: wait for a card write that is in flight (or handed to a "raw_write"
                 // task that has not run yet).  Without this the file was closed under the
                 // write, and the buffer was freed below while FIO_WriteFile() still read it.
+                stopping = 1;
                 int have_write_sem = (take_semaphore(write_sem, STOP_WRITE_WAIT_MS) == 0);
 
                 // Step 2: write out what is still in the buffers.  Frames are accepted into
@@ -755,6 +811,7 @@ static void worker(void)
                 }
                 if (have_write_sem)
                     give_semaphore(write_sem);
+                stopping = 0;
 
                 // restore LV away from raw. This ML asserts if not paired with raw_lv_request(),
                 // but is safe; on M50 II it may fault (EvfDevState) -- the file is already closed.
