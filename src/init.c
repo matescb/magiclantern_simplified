@@ -1335,6 +1335,85 @@ void m50ii_dabort_stub(void);
  * mis-attributed PC (pc pointed at a store where the ROM guarantees a non-null dest, yet
  * r1=0/DFAR=0). Adding the faulting SP/LR + r4-r11 + a ROM-retaddr stack scan gives a real
  * backtrace so the true fault site can be identified. */
+#ifdef CONFIG_M50mk2
+/* [M50II G2] Extra abort dump for the PropertyMgr boot crash pc=0xE021B8FC lr=0xE04037A1
+ * dfar=0x46 (docs/offline/A4.md, F5.md section 7, G2.md). At that fault r8 = registration
+ * record {handler, priv, token_cb, n, props[n]} and r6 = fresh token {n, handler, priv, ..}.
+ * Prints "[ABX]" lines after the normal "[ABORT]" dump. Never proven on hardware.
+ * Reads are guarded twice: address range (cacheable RAM only, never MMIO) and an MMU
+ * translation probe (ATS1CPR -> PAR bit0), so an unmapped pointer is skipped, not read. */
+static uint32_t m50ii_abort_stack[256];        /* tentative decl; word [0] = re-entry marker */
+#define M50II_ABX_MARK 0xAB0D0001u
+
+static int m50ii_abx_ok(uint32_t a, uint32_t len)
+{
+    uint32_t par, va = a;
+    if (a < 0x1000u || a >= 0x40000000u - len) return 0;
+    for (int i = 0; i < 2; i++, va = a + len - 1)
+    {
+        __asm__ volatile("mcr p15,0,%0,c7,c8,0" :: "r"(va));    /* ATS1CPR: priv read probe */
+        __asm__ volatile("isb");
+        __asm__ volatile("mrc p15,0,%0,c7,c4,0" : "=r"(par));   /* PAR: bit0 = would fault */
+        if (par & 1) return 0;
+    }
+    return 1;
+}
+
+static uint32_t m50ii_abx_word(uint32_t a)     /* guarded read; 0 if not readable */
+{
+    a &= ~3u;
+    return m50ii_abx_ok(a, 4) ? *(volatile uint32_t *)a : 0;
+}
+
+static void m50ii_abx_dump(const char *tag, uint32_t a, uint32_t nwords)
+{
+    extern void m50ii_uart_str(const char *);
+    char b[12];
+    a &= ~3u;
+    if (!m50ii_abx_ok(a, nwords * 4)) return;
+    for (uint32_t i = 0; i < nwords; i++, a += 4)
+    {
+        if ((i & 7) == 0)
+        {
+            m50ii_uart_str("\n[ABX] "); m50ii_uart_str(tag);
+            m50ii_uart_str(m50ii_hex(b, a)); m50ii_uart_str(":");
+        }
+        m50ii_uart_str(" "); m50ii_uart_str(m50ii_hex(b, *(volatile uint32_t *)a) + 2);
+    }
+}
+
+static void m50ii_abort_xdump(uint32_t *rr, uint32_t pc)
+{
+    extern void m50ii_uart_str(const char *);
+    if (m50ii_abort_stack[0] == M50II_ABX_MARK) return;   /* faulted in here before: skip */
+    m50ii_abort_stack[0] = M50II_ABX_MARK;
+    m50ii_abx_dump("r8 @", rr[8], 16);
+    m50ii_abx_dump("r6 @", rr[6], 16);
+    m50ii_abx_dump("r4 @", rr[4], 8);
+    if (pc == 0xE021B8FCu && m50ii_abx_ok(rr[8] & ~3u, 0x20) && m50ii_abx_ok(rr[6] & ~3u, 12))
+    {
+        static const char lbl[] = "\n[ABX] rec h=\0 priv=\0 tcb=\0 n=\0 props=\0 \0 \0 \0\n[ABX] tok n=\0 h=\0 priv=";
+        const char *l = lbl;
+        char b[12];
+        for (int i = 0; i < 11; i++)       /* 8 words of the record at r8, then 3 of the token at r6 */
+        {
+            m50ii_uart_str(l); while (*l++) { }
+            m50ii_uart_str(m50ii_hex(b, ((volatile uint32_t *)((i < 8 ? rr[8] : rr[6] - 32) & ~3u))[i]));
+        }
+    }
+    /* token variables of the registrants F5 lists (F5.md sections 1, 3, 4, 7) */
+    m50ii_abx_dump("A5E0>", m50ii_abx_word(0xA5E0), 10);          /* state 0x58278: tokens +8..+0x20 */
+    m50ii_abx_dump("A590>", m50ii_abx_word(0xA590), 8);           /* ApexProperty: tokens +8..+0x18 */
+    m50ii_abx_dump("A68C @", 0xA68C, 2);                          /* token at +4 */
+    m50ii_abx_dump("107B0>+30 @", m50ii_abx_word(0x107B0) + 0x30, 2);   /* token at +0x34 */
+    m50ii_abx_dump("54DC @", 0x54DC, 8);                          /* state of registration 0xE01DC11E */
+    m50ii_abx_dump("63B0 @", 0x63B0, 8);                          /* +0x1C = default prop object */
+    m50ii_uart_str("\n");
+    m50ii_abort_stack[0] = 0;
+}
+#endif /* CONFIG_M50mk2 */
+
+
 void __attribute__((used)) m50ii_abort_report(uint32_t *ctx, uint32_t spsr, uint32_t type)
 {
     extern void m50ii_uart_str(const char *);
@@ -1384,6 +1463,9 @@ void __attribute__((used)) m50ii_abort_report(uint32_t *ctx, uint32_t spsr, uint
             }
         }
     }
+#ifdef CONFIG_M50mk2
+    m50ii_abort_xdump(rr, pc);   /* [G2] extra "[ABX]" dump, docs/offline/G2.md */
+#endif
     m50ii_uart_str("[ABORT] HANG (fault captured; looping short dump)\n");
     /* [M50II 2026-07-11] Re-print a SHORT line forever (busy-delay; abort ctx has no scheduler) so
      * the lossy J-Link VCOM (drops chars at 115200 under load) eventually passes a clean copy. */
