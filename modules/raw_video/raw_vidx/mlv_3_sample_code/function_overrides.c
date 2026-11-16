@@ -169,3 +169,11 @@ uint32_t FIO_WriteFile(FILE *fp, void *ptr, uint32_t count)
 
     return fwrite(ptr, count, 1, fp);
 }
+
+// raw_vid.h routes SEND_LOG_DATA_STR() to the M50 II core's UART writer;
+// on the host the log text goes to stderr.
+void m50ii_uart_str(const char *s)
+{
+    if (s != NULL)
+        fputs(s, stderr);
+}

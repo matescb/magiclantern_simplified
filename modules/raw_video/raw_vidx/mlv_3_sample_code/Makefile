@@ -1,7 +1,9 @@
 BUILD_DIR = build
 SRC_DIR = ../../../../src
 INCLUDE_ARGS = -I.. -I./include -I$(SRC_DIR)
-CFLAGS = -m32 -ggdb3 $(INCLUDE_ARGS)
+# -DMODULE: mlv_3.c is module code; without it src/property.h stops with
+# "No PROP_PICSTYLE scheme defined for your DIGIC generation".
+CFLAGS = -m32 -ggdb3 -DMODULE $(INCLUDE_ARGS)
 
 .PHONY: clean default $(BUILD_DIR)
 
