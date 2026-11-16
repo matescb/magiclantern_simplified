@@ -144,7 +144,7 @@ THUMB_FN(0xE03C5270, _malloc)                               /* [M50II 1.0.1 OK] 
 THUMB_FN(0xE03C52A8, _free)                                 /* [M50II 1.0.1 OK] push{r4,r5,r6,lr}; shares pool 0x2d160; reads [ptr-8] header; +0x38 from malloc */
 
 /** Memory info **/
-THUMB_FN(0xE009DEB8,  memmap_info)                          /* Exception vector, DRYOS system memory etc */
+THUMB_FN(0xE039A3D8,  memmap_info)                          /* Exception vector, DRYOS system memory etc */
 THUMB_FN(0xE0146FD6,  smemShowFix)                          /* Common Lower, Common Upper etc */
 THUMB_FN(0xE00F1C18,  malloc_info)                          /* Malloc Information */
 THUMB_FN(0xE00F1CB0,  sysmem_info)                          /* System Memory Information */
