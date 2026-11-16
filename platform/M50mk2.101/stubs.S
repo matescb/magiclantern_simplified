@@ -318,7 +318,7 @@ DATA_PTR(       0x0,  LCD_Palette)                          // D8 has no indexed
  * debug message */
 THUMB_FN(0xE0567A34,  PlayMain_handler)                     // msg: "StartPlayMain"
 THUMB_FN(0xE06BCD84,  ShootOlcApp_handler)                  // msg: "StopShootOlcApp PopPalette(%d)"
-THUMB_FN(0xE07A8C30,  LiveViewApp_handler)                  // msg: "StartLiveViewApp(%#x)"
+THUMB_FN(0xE0444058,  LiveViewApp_handler)                  /* [M50II 1.0.1 OK, offline F7] was 0xE07A8C30 = StarShootingTime dialog handler (created by 0xE07A8D10, slot 0x14EB0). StartLiveViewApp 0xE0445864 passes literal [0xE0445C1C]=0xE0444059 to WINSYS_CreateDialogBox 0xE059F43C at 0xE044591C */
 //THUMB_FN(0xe0338a10,  LiveViewShutterApp_handler)         // msg: "StartLiveViewShutterApp"
 THUMB_FN(0xE08F993C,  PlayMovieGuideApp_handler)            // msg: "StartPlayMovieGuideApp"
 
