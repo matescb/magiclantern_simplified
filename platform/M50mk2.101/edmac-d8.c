@@ -82,11 +82,12 @@ const uint32_t mem2mem_devices[2] = {0, 7};
 uint32_t mem2mem_resources[2] = {0x100AD, 0x100BB};
 #define MEM2MEM_RD_CH 46
 #define MEM2MEM_WR_CH 13
-/* [M50mk2, docs/32] bilal/SX740 used 0x373f0126 (InSelType nibble 0x100). On mk2 the boomer config
- * table (base *(0xe05b767c)=0xE1087A8C) has ch13 InSelType=0x200, so the select wrapper 0xe05b752e
- * asserts Engine::Outer.c:0x0A0 (sel&0xf00 != 0x200). Flip the InSelType nibble 1->2; the low byte
- * 0x26 (the only bits that reach HW, written to boomer node 0x4E via 0xe0683ca0) is unchanged. */
-#define MEM2MEM_BOOMER_SELECTOR 0x373f0226
+/* [M50mk2 offline F2, docs/offline/F2.md] Restored to the value M50 mk1 and SX740 use. The former
+ * 0x373f0226 was fitted to the asserts of the wrong function (Engine::Outer.c 0xe05b752e, port 13).
+ * edmac_select_boomer is now Engine::Edmac.c 0xe05b802e; row 13 of its table 0xE0EC3BD4 is
+ * {node 0xC0000, type 0x100, class mask 0x20000000}, which 0x373f0126 satisfies (0x0100 == type,
+ * 0x373F0000 & 0x20000000 != 0). The low byte 0x26 is the value written to boomer node 0xC. */
+#define MEM2MEM_BOOMER_SELECTOR 0x373f0126
 #define MEM2MEM_MODE 0x0 // 1 - 32bit, 2 - 64bit, 3 - 128bit
 #define MEM2MEM_WAIT_MS 50
 

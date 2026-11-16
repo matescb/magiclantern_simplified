@@ -374,8 +374,18 @@ THUMB_FN(0xe05b848e,  edmac_set_address)                    /* leaf: writes addr
  * capability gate false -> no assert. +0xc twin matches SX740 (f192->f19e) / M50mk1 (a9ae->a9ba). */
 THUMB_FN(0xe05b849a,  edmac_set_size)                       /* leaf: 2-D geometry writer (channel, struct edmac_info*) */
 THUMB_FN(0xe05b88fc,  edmac_set_transfer_mode)              /* set chan transfer mode */
-THUMB_FN(0xe05b9690,  StartEDmac_maybe)                     /* start an EDMAC channel */
-THUMB_FN(0xe05b95e4,  ConnectReadEDmac_maybe)               /* connect a read chan (single arg on D8) */
+/* [M50mk2 offline F2, docs/offline/F2.md] was 0xe05b9690: that function asserts Engine::Edmac.c:0x770
+ * unless the channel descriptor has flag bit1 (read channel), so it can never start write channel 13
+ * (flags 5), and it has ONE caller in the ROM. 0xe05b82ae is the function Canon calls on the write and
+ * the read channels right after edmac_set_address (e.g. 0xE00BF404/42A/434; 267 direct callers) and it
+ * sits at set_address-0x1E0 (M50 mk1 / SX740 / R: -0x1E2). NOT hardware-tested. */
+THUMB_FN(0xe05b82ae,  StartEDmac_maybe)                     /* restart channel: disable, reset pulse, arm (was 0xe05b9690) */
+/* [M50mk2 offline F2] was 0xe05b95e4 (2 callers; the partner of 0xe05b9690). 0xe05b7a32 is what Canon
+ * calls on the READ channels directly after 0xe05b82ae (0xE00BF440/450; 156 direct callers): asserts
+ * Edmac.c:0x3AC unless read channel, reg+8=0x12, reg+0xB4=1. MEDIUM confidence: the mk1 positional
+ * homolog (reset_channel-0x3A) would be 0xe05b7b08, a bare "reg+4=0" leaf, which cannot start a copy;
+ * chosen by Canon call order instead. NOT hardware-tested. */
+THUMB_FN(0xe05b7a32,  ConnectReadEDmac_maybe)               /* kick a read channel (was 0xe05b95e4) */
 /* [M50mk2 RAW-VIDEO channel-prepare fix, docs/32] edmac-d8.c's mem2mem calls edmac_reset_channel(RD)+(WR)
  * as the first two calls -- in Canon's real mem2mem this slot is the per-channel PREPARE (kitor's EOS R
  * FUN_e0535998), which clears the per-channel status array and pokes the channel MMIO into its ready state
@@ -385,16 +395,19 @@ THUMB_FN(0xe05b95e4,  ConnectReadEDmac_maybe)               /* connect a read ch
  * incomplete" every frame. FUN_e05b7b42 IS the prepare (verified: clears status arr, field_0xb4=2, Port<0x4c
  * bounds check @Engine::Edmac.c:0x288; called by Canon Mem1Path/OrbbenPath/WbDetectionPath SetPath). */
 THUMB_FN(0xe05b7b42,  edmac_reset_channel)                  /* Canon per-channel PREPARE (FUN_e0535998 analog; was 0xe05b96b8 = reset-prepared-channel, wrong) */
-/* [M50mk2 RAW-VIDEO boomer fix, docs/32] These two were the WRONG boomer layer -- they pointed at the
- * low-level per-InputPort setters (Engine::BoomerVdKick.c / Engine::BoomerSelector.c, arg = packed
- * BoomerID>>16) instead of the Engine::Outer.c WRAPPERS that mem2mem (edmac-d8.c) calls with a RAW
- * channel. Result: boomer mis-configured for the mem2mem WR/RD channels -> StartEDmac assert
- * Engine::Edmac.c:0x770 -> crash on record. Correct wrappers take a raw channel, look up the per-channel
- * boomer config table (DAT_e05b767c, stride 0x14), and are adjacent (kitor's EOS R VdKick e0535e64 ->
- * Selector e0535ee2 pattern). Selector verified: bilal's 0x373f0126 passes its InSelType(0x100)/
- * InSelEdmacType(0x20000000) checks for ch13/46. edmac_stop_boomer_maybe(0xe05b80c2) was already right. */
-THUMB_FN(0xe05b7520,  edmac_reset_boomer_vdkick)            /* Outer.c wrapper: raw chan -> low-level VdKick (was 0xe05b5720, wrong layer) */
-THUMB_FN(0xe05b752e,  edmac_select_boomer)                  /* Outer.c wrapper: (raw chan, bsel=0x373f0126) (was 0xe0683ca0, wrong layer) */
+/* [M50mk2 offline F2, docs/offline/F2.md; supersedes the docs/32 "boomer fix"] The two stubs below
+ * used to point at 0xe05b7520 / 0xe05b752e. Those are Engine::Outer.c functions: they index table
+ * 0xE1087A8C (stride 0x14) by OUTER-MODULE PORT, not by EDMAC channel (port 13 = boomer node 0x4E,
+ * type 0x200), so mem2mem programmed a foreign node and left EDMAC write channel 13 unconnected.
+ * The per-EDMAC-channel functions live in Engine::Edmac.c and index table 0xE0EC3BD4 (stride 0xC):
+ *   0xe05b7fb6 = UnregisterEDmacCompleteCBR + 0x4E (same delta on M50 mk1 and SX740), VdKick := 0
+ *   0xe05b802e = edmac_stop_boomer_maybe - 0x94   (same delta on M50 mk1 and SX740)
+ * Canon calls them back to back as (ch) then (ch, 0x017F0118) at 0xE00BEE20 / 0xE00BEE3E.
+ * Row 13 of 0xE0EC3BD4 is {node 0xC0000, type 0x100, class mask 0x20000000}: the UNMODIFIED mk1 selector
+ * 0x373f0126 passes all three checks (Edmac.c 0x301/0x304/0x306); 0x373f0226 would assert 0x304.
+ * NOT hardware-tested. The pulse variant 0xe05b8006 (VdKick 0 then 1) is the documented fallback. */
+THUMB_FN(0xe05b7fb6,  edmac_reset_boomer_vdkick)            /* Edmac.c: per-channel VdKick off (was 0xe05b7520 = Outer.c port wrapper) */
+THUMB_FN(0xe05b802e,  edmac_select_boomer)                  /* Edmac.c: (channel, selector 0x373f0126) (was 0xe05b752e = Outer.c port wrapper) */
 THUMB_FN(0xe05b7c48,  RegisterEDmacCompleteCBR)             /* register EDMAC completion CBR (was NOP in fn_overrides) */
 THUMB_FN(0xe05b7f68,  UnregisterEDmacCompleteCBR)           /* unregister EDMAC completion CBR */
 /* [M50mk2 RAW-VIDEO packunpack fix, docs/32] was 0xe05b8f38 = a 3-arg pack/unpack MODE SETTER
@@ -408,7 +421,12 @@ THUMB_FN(0xe05b80c2,  edmac_stop_boomer_maybe)              /* stop Boomer for a
 THUMB_FN(0xe06b934e,  PwrMng_WakeSubChips)                  /* power on EDMAC sub-chips {0,7}; MUST precede EDMAC MMIO */
 THUMB_FN(0xe06b937c,  PwrMng_SuspendSubChips)               /* power off EDMAC sub-chips */
 THUMB_FN(0xE05BE4BE,  CreateResLockEntry)                   /* create engine resource lock entry */
-THUMB_FN(0xe05be8a6,  LockEngineResources)                  /* lock engine resources */
+/* [M50mk2 offline F2] 0xe05be8a6 is a NON-BLOCKING try-lock (returns 0xD on contention, zero ROM callers).
+ * Deliberately left as is: see docs/offline/F2.md section 5. The blocking lock every reference port uses
+ * (Create+0x1E8, 105 callers) and the entry destructor are exported under new names for experiments. */
+THUMB_FN(0xe05be8a6,  LockEngineResources)                  /* try-lock engine resources (never waits) */
+THUMB_FN(0xe05be6a6,  LockEngineResources_blocking)         /* Canon's blocking lock (semaphore wait, no timeout) */
+THUMB_FN(0xe05be5a2,  DeleteResLockEntry)                   /* free a ResLock entry; 0xD if still locked, 7 if bad magic */
 THUMB_FN(0xe05be740,  UnLockEngineResources)                /* unlock engine resources (was NOP in fn_overrides) */
 THUMB_FN(0xe05cc5fe,  CreateEventFlag_strictly)             /* create DryOS event flag (mem2mem completion sync) */
 
