@@ -722,7 +722,10 @@ char *write_video_frame_header(uint32_t image_size, char *start, char *end)
 
     // write vidf header to buf_start
     vidf_block.size = (image_start + image_size) - start;
-    vidf_block.timestamp = get_us_clock();
+    // Relative to the start of the recording, like every other block we write and like
+    // mlv_lite's VIDF (mlv_set_timestamp(hdr, mlv_start_timestamp)).  This used to be the
+    // absolute uptime, so the first frame appeared tens of seconds after the header blocks.
+    vidf_block.timestamp = get_us_clock() - session_start_timestamp;
     vidf_block.frame_number = session_frame_number;
     vidf_block.crop_offset_x = session_crop_offset_x;
     vidf_block.crop_offset_y = session_crop_offset_y;
@@ -772,6 +775,12 @@ int start_mlv_session(struct mlv_session *session)
     session_fps = session->fps;
     session_res_x = session->res_x;
     session_res_y = session->res_y;
+    // Where the recorded window sits in the full raw frame.  These were never copied,
+    // so every VIDF said crop 0,0 / pan 0,0 whatever the caller asked for.
+    session_crop_offset_x = session->crop_offset_x;
+    session_crop_offset_y = session->crop_offset_y;
+    session_pan_offset_x = session->pan_offset_x;
+    session_pan_offset_y = session->pan_offset_y;
     session_start_timestamp = get_us_clock();
     session_GUID = get_GUID();
     session_frame_number = 0;
