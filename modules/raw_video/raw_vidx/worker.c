@@ -529,13 +529,10 @@ static void worker(void)
                     }
                 }
 
-                // [M50 II] Do NOT seed the EDMAC completion-CBR table here.
-                // Live HW test (boot 205, wr m50ii_seed_cbrs=0) proved the seed's no-op stub on the
-                // channel Canon's lv_save_raw job drives leaves that completion IRQ un-acked ->
-                // Engine::MvRawProDs/RawPro/LvJob nullptr + a [kern] interrupt STORM that wedges the
-                // camera. The working M50 mk1 reference (bilal) never seeds. Without the seed there
-                // is no pc=0 crash here (Canon registers its own CBR on the raw channel), and no
-                // storm. The seed remains available for the mem2mem path via edmac_memcpy_res_lock.
+                // [M50 II] No EDMAC setup is needed here: frames are read straight from
+                // raw_info.buffer and cropped with a CPU copy in IMAGE_DATA above, so this module
+                // touches no EDMAC channel or completion-CBR table (and the core at this revision
+                // has no CBR "seed" helper to call).
 
                 // Get new save file
                 if (raw_vid_fp != NULL)
