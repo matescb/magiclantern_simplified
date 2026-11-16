@@ -322,7 +322,17 @@ static void fps_read_current_timer_values();
     // Variable, like 200D?  Different base clock though.
 
 #elif defined(CONFIG_DIGIC_VIII) || defined(CONFIG_DIGIC_X)
+    #if defined(CONFIG_M50mk2)
+    // 27 MHz, inherited from the M50 mk1 port (measured there: fps x A x B = 26.86..26.98 MHz
+    // over nine video modes). NOT yet measured on the mk2: no timer A/B readout exists in our
+    // UART history. Supporting evidence (docs/offline/C4c.md): same FPS register block, and the
+    // 1.0.1 ROM init table @0xE1313418 loads 0xD0406198/0xD040619C with 0x215, the timer A value
+    // mk1 logged for 720p100/120. To confirm on hardware, in 1080p25 read 0xD0406198 and
+    // 0xD04061A4: 25 x (A+1) x (B+1) should be ~27.0e6 (mk1: 0x2D1 x 0x5D7), not 32.0e6.
+    #define TG_FREQ_BASE 27000000
+    #else
     #define TG_FREQ_BASE 32000000 //copy from 700D
+    #endif
     #define FPS_TIMER_A_MIN (fps_timer_a_orig)
 #elif defined(CONFIG_100D)
     #define TG_FREQ_BASE 32000000
