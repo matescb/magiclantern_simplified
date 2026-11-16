@@ -147,7 +147,7 @@ THUMB_FN(0xE03C52A8, _free)                                 /* [M50II 1.0.1 OK] 
 THUMB_FN(0xE039A3D8,  memmap_info)                          /* Exception vector, DRYOS system memory etc */
 THUMB_FN(0xE013D480,  smemShowFix)                          /* Common Lower, Common Upper etc */
 THUMB_FN(0xE03CAE30,  malloc_info)                          /* Malloc Information */
-THUMB_FN(0xE00F1CB0,  sysmem_info)                          /* System Memory Information */
+THUMB_FN(0xE03CAEC8,  sysmem_info)                          /* System Memory Information */
 
 /** Misc **/
 /* [M50II 1.0.1 Phase B - re-anchored, verified by romdis this session] inherited 0xE055A8B4
