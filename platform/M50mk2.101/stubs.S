@@ -266,6 +266,14 @@ THUMB_FN(0xE05BD552,  GetMemoryAddressOfMemoryChunk)        // "IsChunkSignature
 THUMB_FN(0xE05BD95C,  DeleteMemorySuite)                    // String "DeleteMemorySuite 0x%x"
 THUMB_FN(0xE05BDBE8,  CreateMemorySuite)                    // String "PackMem.c", calls malloc(0x18)
 THUMB_FN(0xE05BD22E,  CreateMemoryChunk)                    // called from CreateMemorySuite
+/* [M50II 1.0.1 LIKELY, offline F7] SRM pair located (A8). 0xe056a5c6/0xe056da22 below were mk1 addresses.
+ * Both are in the pointer table 0xE02D19C8/CC, allocate a 0x34-byte message + 8, and assert
+ * "Resource::RscMgr.c" (0xE057AB10) lines 0x30E.. / 0xAB1... Canon caller 0xE0079344 passes
+ * (cbr 0xE00792DF, ctx 0xF99C+8) and prints "SRM_AllocateMemoryResourceFor1stJob failed" on timeout;
+ * 0xE0079266 frees with (buffer, 0, 0). SRM USE STAYS DISABLED: CONFIG_MEMORY_SRM_NOT_WORKING is still
+ * defined in internals.h and SRM_BUFFER_SIZE is unverified. */
+THUMB_FN(0xE057B7BA,  SRM_AllocateMemoryResourceFor1stJob)  /* (cbr, ctx) */
+THUMB_FN(0xE057DA00,  SRM_FreeMemoryResourceFor1stJob)      /* (buffer, 0, 0) */
 //kitor: disabled using CONFIG_MEMORY_SRM_NOT_WORKING
 //THUMB_FN(0xe056a5c6,  SRM_AllocateMemoryResourceFor1stJob)  // "pMessage" and "pPriorMessage" with "RscMgr.c". Unsure - there seems to be multiple identical functions
                                                             // Matched like in R by structure params to 200D stub 
