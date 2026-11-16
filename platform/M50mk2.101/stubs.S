@@ -214,7 +214,7 @@ THUMB_FN(0xE05D0D78,  take_semaphore_now)
 DATA_PTR(   0x11144,  gui_task_list)                        /* [M50II 1.0.1 base OK, offline F7] was 0xFB38 (mk1 copy). CtrlMan.c 0xE07BCF68: [0x11144] = CreateRecursiveLock([0x11144+0x1C]); 0xE07BD3DC: AcquireRecursiveLock([0x11144]) then reads [+0xC]. NOTE: `current` is probably at +0xC here, gui-common.h:116 has it at +8 - layout NOT confirmed. */
 THUMB_FN(0xE0599FBA,  SetGUIRequestMode)                    /* [M50II 1.0.1 OK] by debug message; writes gui-state field */
 THUMB_FN(0xE021DB7C,  gui_main_task)                        /* [M50II 1.0.1 OK] entry ptr 0xE021DB7D in literal@0xE021DFD4 loaded by create_gui_main_task(0xE021DBC6) before task_create */
-THUMB_FN(0xe054f3ca,  dialog_redraw)                        // via xrefs to "pDialog->pSignature == pcSignature"
+THUMB_FN(0xE065A4FC,  dialog_redraw)                        /* [M50II 1.0.1 STUBBED OUT, offline F7] was 0xE054F3CA = literal pool (not code). Real function not found; 0xE065A4FC is a bare `bx lr`, so the call is a no-op instead of a crash. Candidate for the real one: 0xE05A094C (unverified). */
 THUMB_FN(0xE03FD182,  gui_massive_event_loop)               // various "GUICMD_"* strings
 THUMB_FN(0xE021DCB2,  gui_enqueue_message)                  // via string "warning! QueueLength=" and "GUI::GUI.c" in one function
 THUMB_FN(0xE065A4F2,  gui_init_end)                         /* [M50II 1.0.1 F7-fix] was 0xE065A4F4 (2 bytes into fn, at the `bne`); real entry 0xE065A4F2 = `cmp r0,#0`; verify_stubs.py flagged cond-branch-at-entry, via "EndGuiInit" string */
