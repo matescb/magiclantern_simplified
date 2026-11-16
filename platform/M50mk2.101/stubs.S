@@ -46,7 +46,7 @@ DATA_PTR(    0x1028,  current_task)                         /* from task_create;
 THUMB_FN(0xE05BA37A,  msleep)                               /* [M50II 1.0.1 OK] r0=ms; [0x100c] interrupt-context assert; found via SleepTime(%d) caller */
 THUMB_FN(0xE05F40BA,  task_create)                          /* [M50II 1.0.1 OK] 3 task-name anchors (GuiMainTask/PowerMgr/TaskMain) -> this bl; assert str "SystemIF::KerTask.c" */
 THUMB_FN(0xE05F42D2,  task_create_ex)                       /* [M50II 1.0.1 OK] sibling of task_create (0xE05F40BA), +0x218; push{r4-r7,lr}; selects CPU for task */
-NSTUB( 0x40CC, task_max)
+NSTUB(    0x4108,  task_max)                             /* [M50II 1.0.1 OK, offline F7] was 0x40CC. get_task_by_id 0xE00A6BC6 bounds id by *(0x4108) (literal @0xE00A6F6C); enumerator 0xE014A65E walks *(0x40E8)+0x5C*n up to *(0x4108) */
 
 /** File I/O **/
 THUMB_FN(0xE05B163E, _FIO_CreateFile)                       /* [M50II 1.0.1 OK] 'Create' tag@0xE05B1A40; drive-letter parse; was 0xE05465E6 (mid-func, wrong) */
