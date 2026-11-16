@@ -211,7 +211,7 @@ THUMB_FN(0xE05D0DA8,  take_semaphore)                       /* [M50II 1.0.1 OK] 
 THUMB_FN(0xE05D0D78,  take_semaphore_now)
 
 /** GUI **/
-DATA_PTR(    0xfb38,  gui_task_list)                        // based on R. Ref to "CtrlMan: Use RecursiveLock"
+DATA_PTR(   0x11144,  gui_task_list)                        /* [M50II 1.0.1 base OK, offline F7] was 0xFB38 (mk1 copy). CtrlMan.c 0xE07BCF68: [0x11144] = CreateRecursiveLock([0x11144+0x1C]); 0xE07BD3DC: AcquireRecursiveLock([0x11144]) then reads [+0xC]. NOTE: `current` is probably at +0xC here, gui-common.h:116 has it at +8 - layout NOT confirmed. */
 THUMB_FN(0xE0599FBA,  SetGUIRequestMode)                    /* [M50II 1.0.1 OK] by debug message; writes gui-state field */
 THUMB_FN(0xE021DB7C,  gui_main_task)                        /* [M50II 1.0.1 OK] entry ptr 0xE021DB7D in literal@0xE021DFD4 loaded by create_gui_main_task(0xE021DBC6) before task_create */
 THUMB_FN(0xe054f3ca,  dialog_redraw)                        // via xrefs to "pDialog->pSignature == pcSignature"
