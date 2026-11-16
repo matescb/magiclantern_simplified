@@ -55,6 +55,12 @@
 #define GMT_FUNCTABLE               0xE099E958           /* [M50II 1.0.1 OK] from gui_main_task; was M50.110 0xE08FFB94 */
 #define GMT_NFUNCS                  0x7                  //size of table above
 
+/* [offline F7] WRONG, M50 mk1 values: the words 0x75094 and 0x8E660 occur nowhere in ROM0
+ * (aligned literal scan of gang100.bin). Real bases not derived (the lvae_* handlers run from
+ * RAM at 0x0224xxxx). Values are left in place so the build is unchanged; anything that uses
+ * CONTROL_BV*, LVAE_DISP_GAIN, LVAE_MOV_M_CTRL or LVAE_ISO_MIN reads or writes unrelated RAM.
+ * Keep exposure override / ExpSim features off until these are re-derived on hardware.
+ * LVAE_ISO_MIN is also mis-parenthesised (dereferences, then adds 0xE). */
 #define LVAE_STRUCT                 0x75094              // First value written in 0xe04ffb38
 #define CONTROL_BV      (*(uint16_t*)(LVAE_STRUCT+0x28)) // via "lvae_sentcontrolbv"
 #define CONTROL_BV_TV   (*(uint16_t*)(LVAE_STRUCT+0x2E)) // via "lvae_setcontrolaeparam"
